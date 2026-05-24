@@ -1,0 +1,12 @@
+node_modules/
+.playwright-cli/
+cc-switch/
+data/*
+!data/.gitkeep
+output/
+.env
+.env.*
+!.env.example
+*.local
+*.tmp
+*.log

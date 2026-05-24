@@ -1,0 +1,27 @@
+{
+  "name": "gpt-pro-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Codex usage monitor for 5-hour and weekly quota windows.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "smoke": "node scripts/smoke.js",
+    "secret": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\"",
+    "codex:usage": "node scripts/codex-usage-probe.js",
+    "probe:endpoints": "node scripts/openai-endpoint-probe.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "chatgpt",
+    "monitor",
+    "quota",
+    "md3e"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "playwright-core": "^1.60.0"
+  }
+}

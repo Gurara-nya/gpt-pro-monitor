@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GPT Pro Monitor</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <p>Codex telemetry</p>
+            <h1>GPT Pro Monitor</h1>
+            <div class="brand-meta">
+              <span class="plan-badge" id="planBadge">--</span>
+              <span class="status-badge" id="statusBadge">等待</span>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-side">
+          <div class="sync-meta" aria-label="同步状态">
+            <span>Last <strong id="lastSync">--</strong></span>
+            <span>Next <strong id="nextRun">--</strong></span>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="refreshButton" type="button" aria-label="立即同步" title="立即同步">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="icon-button" id="settingsButton" type="button" aria-label="设置" title="设置">
+              <i data-lucide="sliders-horizontal"></i>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="window-grid" aria-label="核心用量窗口">
+          <article class="window-card" data-window="primary">
+            <div class="window-head">
+              <div>
+                <span>5 hour window</span>
+                <h3 id="primaryRemaining">--</h3>
+              </div>
+              <i data-lucide="timer-reset"></i>
+            </div>
+            <div class="window-meter"><span id="primaryMeter"></span></div>
+            <dl class="window-facts">
+              <div>
+                <dt>Used</dt>
+                <dd id="primaryUsed">--</dd>
+              </div>
+              <div>
+                <dt>Reset</dt>
+                <dd id="primaryReset">--</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="window-card" data-window="secondary">
+            <div class="window-head">
+              <div>
+                <span>Weekly window</span>
+                <h3 id="secondaryRemaining">--</h3>
+              </div>
+              <i data-lucide="calendar-clock"></i>
+            </div>
+            <div class="window-meter"><span id="secondaryMeter"></span></div>
+            <dl class="window-facts">
+              <div>
+                <dt>Used</dt>
+                <dd id="secondaryUsed">--</dd>
+              </div>
+              <div>
+                <dt>Reset</dt>
+                <dd id="secondaryReset">--</dd>
+              </div>
+            </dl>
+          </article>
+        </section>
+
+        <section class="history-panel" aria-label="同步历史">
+          <div class="panel-head">
+            <div>
+              <p>History</p>
+              <h2>同步历史</h2>
+            </div>
+            <div class="history-actions">
+              <div class="view-tabs" role="tablist" aria-label="历史视图">
+                <button class="view-tab" data-view="day" type="button">日</button>
+                <button class="view-tab" data-view="week" type="button">周</button>
+                <button class="view-tab" data-view="month" type="button">月</button>
+              </div>
+              <button class="icon-button quiet" id="clearButton" type="button" aria-label="清空历史" title="清空历史">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+          </div>
+          <div class="range-control">
+            <button class="icon-button quiet" id="prevPeriodButton" type="button" aria-label="上一段">
+              <i data-lucide="chevron-left"></i>
+            </button>
+            <strong id="historyRangeLabel">--</strong>
+            <button class="icon-button quiet" id="nextPeriodButton" type="button" aria-label="下一段">
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </div>
+          <div class="history-chart" id="historyChart"></div>
+          <div class="history-list" id="historyList"></div>
+          <button class="history-list-toggle" id="toggleHistoryListButton" type="button" hidden>
+            展开列表
+          </button>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="settingsDialog">
+      <form id="settingsForm">
+        <header class="dialog-head">
+          <div>
+            <p>Settings</p>
+            <h2>监控设置</h2>
+          </div>
+          <button class="icon-button quiet" id="closeSettingsButton" type="button" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+
+        <div class="settings-body">
+          <section>
+            <h3>账号与接口</h3>
+            <div class="form-grid">
+              <label>
+                <span>显示名称</span>
+                <input name="account.label" autocomplete="off" />
+              </label>
+              <label>
+                <span>套餐名称</span>
+                <input name="account.planName" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>Codex 登录文件</span>
+                <input name="account.authPath" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>用量接口</span>
+                <input name="account.endpoint" autocomplete="off" />
+              </label>
+              <label class="check-row">
+                <input name="account.enabled" type="checkbox" />
+                <span>启用监控</span>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h3>轮询</h3>
+            <div class="form-grid">
+              <label>
+                <span>间隔分钟</span>
+                <input name="schedule.intervalMinutes" type="number" min="5" max="1440" />
+              </label>
+              <label class="check-row">
+                <input name="schedule.enabled" type="checkbox" />
+                <span>自动同步</span>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h3>外观</h3>
+            <div class="form-grid">
+              <label>
+                <span>强调色</span>
+                <input name="appearance.accentColor" type="color" />
+              </label>
+              <label>
+                <span>密度</span>
+                <select name="appearance.density">
+                  <option value="comfortable">舒适</option>
+                  <option value="compact">紧凑</option>
+                  <option value="roomy">宽松</option>
+                </select>
+              </label>
+              <label class="check-row">
+                <input name="appearance.reduceMotion" type="checkbox" />
+                <span>减少动态效果</span>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <footer class="dialog-actions">
+          <button class="text-button" id="exportButton" type="button">导出</button>
+          <span></span>
+          <button class="text-button" id="cancelSettingsButton" type="button">取消</button>
+          <button class="filled-button" type="submit">
+            <i data-lucide="save"></i>
+            保存
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
