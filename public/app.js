@@ -323,20 +323,79 @@ function renderCodexDaily(days) {
     .filter((day) => Number(day.tokens) > 0)
     .slice(-14);
   if (!visible.length) return `<div class="empty-state">本月暂无日消耗数据</div>`;
-  const max = Math.max(...visible.map((day) => Number(day.tokens) || 0), 1);
-  return visible.map((day) => {
-    const width = Math.max(2, Math.round((Number(day.tokens) || 0) / max * 100));
+  const width = 960;
+  const height = 300;
+  const left = 64;
+  const right = 26;
+  const top = 26;
+  const bottom = 54;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  const baseY = top + chartHeight;
+  const maxTokens = Math.max(...visible.map((day) => Number(day.tokens) || 0), 1);
+  const yMax = maxTokens * 1.12;
+  const points = visible.map((day, index) => {
+    const x = visible.length === 1
+      ? left + chartWidth / 2
+      : left + index * chartWidth / (visible.length - 1);
+    const y = baseY - ((Number(day.tokens) || 0) / yMax) * chartHeight;
+    return { day, x, y };
+  });
+  const linePath = points.map((point, index) => `${index ? "L" : "M"} ${svgNumber(point.x)} ${svgNumber(point.y)}`).join(" ");
+  const areaPath = `${linePath} L ${svgNumber(points.at(-1).x)} ${svgNumber(baseY)} L ${svgNumber(points[0].x)} ${svgNumber(baseY)} Z`;
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+    const y = baseY - ratio * chartHeight;
+    const value = Math.round(yMax * ratio);
     return `
-      <div class="token-day">
-        <time datetime="${escapeAttr(day.day)}">${escapeHtml(formatDayLabel(day.day))}</time>
-        <div>
-          <strong>${escapeHtml(day.tokens_display || "--")}</strong>
-          <span>${escapeHtml(day.cost_estimate?.range_display || "--")} · ${escapeHtml(formatInteger(day.threads))} 会话</span>
-          <i><em style="width:${width}%"></em></i>
-        </div>
-      </div>
+      <g>
+        <line x1="${left}" y1="${svgNumber(y)}" x2="${width - right}" y2="${svgNumber(y)}"></line>
+        <text x="${left - 14}" y="${svgNumber(y + 4)}">${escapeHtml(formatCompactTokens(value))}</text>
+      </g>
     `;
   }).join("");
+  const labelStep = Math.max(1, Math.ceil(visible.length / 7));
+  const labels = points.map((point, index) => {
+    if (index % labelStep !== 0 && index !== points.length - 1) return "";
+    return `<text x="${svgNumber(point.x)}" y="${height - 18}" text-anchor="middle">${escapeHtml(formatDayLabel(point.day.day))}</text>`;
+  }).join("");
+  const markers = points.map((point) => `
+    <g class="token-daily-point">
+      <circle cx="${svgNumber(point.x)}" cy="${svgNumber(point.y)}" r="5"></circle>
+      <title>${escapeHtml(`${formatDayLabel(point.day.day)} · ${point.day.tokens_display || "--"} · ${point.day.cost_estimate?.range_display || "--"} · ${formatInteger(point.day.threads)} 会话`)}</title>
+    </g>
+  `).join("");
+  const topDay = visible.reduce((best, day) => Number(day.tokens) > Number(best.tokens) ? day : best, visible[0]);
+  const today = findTodayUsage(visible) || visible.at(-1);
+  const totalTokens = visible.reduce((sum, day) => sum + (Number(day.tokens) || 0), 0);
+  const totalLow = visible.reduce((sum, day) => sum + (Number(day.cost_estimate?.low_usd) || 0), 0);
+  const totalHigh = visible.reduce((sum, day) => sum + (Number(day.cost_estimate?.high_usd) || 0), 0);
+
+  return `
+    <div class="token-daily-chart">
+      <svg class="token-daily-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="每日 Token 消耗折线图">
+        <g class="token-daily-grid">${grid}</g>
+        <path class="token-daily-area" d="${escapeAttr(areaPath)}"></path>
+        <path class="token-daily-line" d="${escapeAttr(linePath)}"></path>
+        <g class="token-daily-markers">${markers}</g>
+        <g class="token-daily-labels">${labels}</g>
+      </svg>
+      <div class="token-daily-summary">
+        ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display || "--"}`, topDay.cost_estimate?.range_display || "--")}
+        ${dailySummaryItem("今日", `${formatDayLabel(today.day)} · ${today.tokens_display || "--"}`, today.cost_estimate?.range_display || "--")}
+        ${dailySummaryItem("近 14 次", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${visible.length} 天`)}
+      </div>
+    </div>
+  `;
+}
+
+function dailySummaryItem(label, value, note) {
+  return `
+    <span>
+      <b>${escapeHtml(label)}</b>
+      <strong>${escapeHtml(value)}</strong>
+      <em>${escapeHtml(note)}</em>
+    </span>
+  `;
 }
 
 function renderCodexBars(items, labelKey) {
@@ -785,6 +844,37 @@ function formatInteger(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   return new Intl.NumberFormat("zh-CN").format(number);
+}
+
+function formatCompactTokens(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "0";
+  if (number >= 100_000_000) return `${trimNumber(number / 100_000_000, 2)}亿`;
+  if (number >= 10_000) return `${trimNumber(number / 10_000, 2)}万`;
+  return formatInteger(Math.round(number));
+}
+
+function formatUsdRange(low, high) {
+  return `${formatUsd(low)}-${formatUsd(high)}`;
+}
+
+function formatUsd(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "$0";
+  if (number >= 1000) return `$${trimNumber(number / 1000, number >= 10000 ? 1 : 2)}K`;
+  if (number >= 10) return `$${number.toFixed(2)}`;
+  if (number >= 1) return `$${number.toFixed(3)}`;
+  return `$${number.toFixed(4)}`;
+}
+
+function svgNumber(value) {
+  return trimNumber(value, 3);
+}
+
+function trimNumber(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  return Number(number.toFixed(digits)).toString();
 }
 
 function formatMonthLabel(value) {
