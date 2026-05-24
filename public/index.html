@@ -85,9 +85,17 @@
 
         <section class="history-panel" aria-label="同步历史">
           <div class="panel-head">
-            <div>
+            <div class="history-heading">
               <p>History</p>
-              <h2>同步历史</h2>
+              <div class="range-control">
+                <button class="range-arrow" id="prevPeriodButton" type="button" aria-label="上一段">
+                  <i data-lucide="chevron-left"></i>
+                </button>
+                <strong id="historyRangeLabel">--</strong>
+                <button class="range-arrow" id="nextPeriodButton" type="button" aria-label="下一段">
+                  <i data-lucide="chevron-right"></i>
+                </button>
+              </div>
             </div>
             <div class="history-actions">
               <div class="view-tabs" role="tablist" aria-label="历史视图">
@@ -99,15 +107,6 @@
                 <i data-lucide="trash-2"></i>
               </button>
             </div>
-          </div>
-          <div class="range-control">
-            <button class="icon-button quiet" id="prevPeriodButton" type="button" aria-label="上一段">
-              <i data-lucide="chevron-left"></i>
-            </button>
-            <strong id="historyRangeLabel">--</strong>
-            <button class="icon-button quiet" id="nextPeriodButton" type="button" aria-label="下一段">
-              <i data-lucide="chevron-right"></i>
-            </button>
           </div>
           <div class="history-chart" id="historyChart"></div>
           <div class="history-list" id="historyList"></div>
