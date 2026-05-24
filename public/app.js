@@ -232,7 +232,7 @@ function renderCodexUsage() {
   if (!report) {
     select.innerHTML = `<option>--</option>`;
     select.disabled = true;
-    setCodexMetricValues("--", "--", "--", "--", "--", "--");
+    setCodexMetricValues("--", "--", "--", "--", "--", "--", {});
     $("#codexCostNote").textContent = codexCostNote(report);
     $("#codexDailyList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexSourceList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
@@ -253,7 +253,12 @@ function renderCodexUsage() {
     today?.cost_estimate?.range_display || "--",
     summary.total_tokens_display || "--",
     selectedView?.tokens_display || "--",
-    selectedView ? `${formatInteger(selectedView.threads)} / ${selectedView?.avg_display || "--"}` : "--"
+    selectedView ? `${formatInteger(selectedView.threads)} / ${selectedView?.avg_display || "--"}` : "--",
+    {
+      total: summary.usage_split,
+      month: selectedView?.usage_split,
+      today: today?.usage_split
+    }
   );
   $("#codexCostNote").innerHTML = codexCostNote(report);
   $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
@@ -298,10 +303,13 @@ function renderCodexMonthSelect(select, monthViews, selectedMonth) {
   }).join("");
 }
 
-function setCodexMetricValues(totalCost, monthCost, todayCost, totalTokens, monthTokens, threads) {
+function setCodexMetricValues(totalCost, monthCost, todayCost, totalTokens, monthTokens, threads, splits = {}) {
   $("#codexTotalCost").textContent = totalCost;
   $("#codexMonthCost").textContent = monthCost;
   $("#codexTodayCost").textContent = todayCost;
+  $("#codexTotalCostDetail").textContent = formatUsageSplit(splits.total);
+  $("#codexMonthCostDetail").textContent = formatUsageSplit(splits.month);
+  $("#codexTodayCostDetail").textContent = formatUsageSplit(splits.today);
   $("#codexTotalTokens").textContent = totalTokens;
   $("#codexMonthTokens").textContent = monthTokens;
   $("#codexMonthThreads").textContent = threads;
@@ -310,7 +318,11 @@ function setCodexMetricValues(totalCost, monthCost, todayCost, totalTokens, mont
 function codexCostNote(report) {
   const source = report?.pricing?.source;
   if (!source) return "费用按 OpenAI 官方输入/输出价格估算。";
-  return `价格源：<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.name)}</a> · ${escapeHtml(source.checkedAt || "")} · ${escapeHtml(source.note)}`;
+  const coverage = report?.pricing?.split_coverage;
+  const split = coverage?.split_threads
+    ? ` · 已拆分 ${escapeHtml(formatInteger(coverage.split_threads))} 个会话 / ${escapeHtml(formatCompactTokens(coverage.split_tokens))} Token`
+    : "";
+  return `价格源：<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.name)}</a> · ${escapeHtml(source.checkedAt || "")}${split} · ${escapeHtml(source.note)}`;
 }
 
 function findTodayUsage(days) {
@@ -361,7 +373,7 @@ function renderCodexDaily(days) {
   const markers = points.map((point) => `
     <g class="token-daily-point">
       <circle cx="${svgNumber(point.x)}" cy="${svgNumber(point.y)}" r="5"></circle>
-      <title>${escapeHtml(`${formatDayLabel(point.day.day)} · ${point.day.tokens_display || "--"} · ${point.day.cost_estimate?.range_display || "--"} · ${formatInteger(point.day.threads)} 会话`)}</title>
+      <title>${escapeHtml(`${formatDayLabel(point.day.day)} · ${point.day.tokens_display || "--"} · ${point.day.cost_estimate?.range_display || "--"} · ${formatUsageSplit(point.day.usage_split)} · ${formatInteger(point.day.threads)} 会话`)}</title>
     </g>
   `).join("");
   const topDay = visible.reduce((best, day) => Number(day.tokens) > Number(best.tokens) ? day : best, visible[0]);
@@ -380,8 +392,8 @@ function renderCodexDaily(days) {
         <g class="token-daily-labels">${labels}</g>
       </svg>
       <div class="token-daily-summary">
-        ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display || "--"}`, topDay.cost_estimate?.range_display || "--")}
-        ${dailySummaryItem("今日", `${formatDayLabel(today.day)} · ${today.tokens_display || "--"}`, today.cost_estimate?.range_display || "--")}
+        ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display || "--"}`, `${topDay.cost_estimate?.range_display || "--"} · ${formatUsageSplit(topDay.usage_split)}`)}
+        ${dailySummaryItem("今日", `${formatDayLabel(today.day)} · ${today.tokens_display || "--"}`, `${today.cost_estimate?.range_display || "--"} · ${formatUsageSplit(today.usage_split)}`)}
         ${dailySummaryItem("近 14 次", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${visible.length} 天`)}
       </div>
     </div>
@@ -410,7 +422,7 @@ function renderCodexBars(items, labelKey) {
       <div class="token-bar">
         <div>
           <strong>${escapeHtml(label)}</strong>
-          <span>${escapeHtml(item.tokens_display || "--")} · ${escapeHtml(item.cost_estimate?.range_display || "--")} · ${escapeHtml(formatInteger(item.threads))} 会话</span>
+          <span>${escapeHtml(item.tokens_display || "--")} · ${escapeHtml(item.cost_estimate?.range_display || "--")} · ${escapeHtml(formatUsageSplit(item.usage_split))} · ${escapeHtml(formatInteger(item.threads))} 会话</span>
         </div>
         <b>${escapeHtml(item.share_display || `${Math.round(share)}%`)}</b>
         <i><em style="width:${share}%"></em></i>
@@ -429,7 +441,7 @@ function renderCodexSessions(sessions) {
       <article class="token-session">
         <div>
           <strong>${escapeHtml(title)}</strong>
-          <span>${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")} · ${escapeHtml(session.cost_estimate?.range_display || "--")} · ${escapeHtml(session.created || "--")}</span>
+          <span>${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")} · ${escapeHtml(session.cost_estimate?.range_display || "--")} · ${escapeHtml(formatUsageSplit(session.usage_split))} · ${escapeHtml(session.created || "--")}</span>
         </div>
         <b>${escapeHtml(session.tokens_display || "--")}</b>
       </article>
@@ -854,7 +866,21 @@ function formatCompactTokens(value) {
   return formatInteger(Math.round(number));
 }
 
+function formatUsageSplit(split) {
+  if (!split || typeof split !== "object") return "拆分暂无";
+  const input = Number(split.input_tokens) || 0;
+  const cached = Number(split.cached_input_tokens) || 0;
+  const output = Number(split.output_tokens) || 0;
+  if (!input && !output) return "拆分暂无";
+  return `入 ${formatCompactTokens(input)} · 缓 ${formatCompactTokens(cached)} · 出 ${formatCompactTokens(output)}`;
+}
+
 function formatUsdRange(low, high) {
+  const lowNumber = Number(low);
+  const highNumber = Number(high);
+  if (Number.isFinite(lowNumber) && Number.isFinite(highNumber) && Math.abs(lowNumber - highNumber) < 0.00005) {
+    return formatUsd((lowNumber + highNumber) / 2);
+  }
   return `${formatUsd(low)}-${formatUsd(high)}`;
 }
 

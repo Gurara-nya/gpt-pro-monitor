@@ -4,7 +4,7 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { existsSync } = require("node:fs");
-const { mkdir, readFile, rename, writeFile } = require("node:fs/promises");
+const { mkdir, readFile, readdir, rename, writeFile } = require("node:fs/promises");
 const { promisify } = require("node:util");
 
 const ROOT = __dirname;
@@ -23,6 +23,7 @@ const CODEX_USAGE_SCRIPT = path.join("scripts", "generate_codex_usage_report.py"
 const CODEX_USAGE_REPORT_FILE = "latest.html";
 const CODEX_USAGE_JSON_FILE = "latest.json";
 const CODEX_USAGE_MD_FILE = "latest.md";
+const CODEX_SESSION_DIRS = ["sessions", "archived_sessions"];
 const DEFAULT_HOST = "127.0.0.1";
 const AUTH_REALM = "GPT Pro Monitor";
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -37,7 +38,12 @@ const OPENAI_PRICE_SOURCE = {
   url: "https://openai.com/api/pricing/",
   checkedAt: "2026-05-24",
   unit: "USD / 1M tokens",
-  note: "Codex state_5.sqlite 只提供 threads.tokens_used 总量；费用按总 token 分别套用输入价和输出价形成区间，未扣除缓存、Batch、Regional、长上下文或工具费用差异。"
+  note: "优先使用本地 rollout JSONL 的 token_count 输入/缓存输入/输出拆分；缺失时回退为总 token 区间估算，未计入 Batch、Regional、长上下文或工具费用差异。"
+};
+const CODEX_SOURCE_LABELS = {
+  vscode: "Codex 桌面端",
+  exec: "自动执行",
+  cli: "命令行"
 };
 const MODEL_PRICING_USD_PER_MILLION = {
   "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 },
@@ -343,7 +349,6 @@ async function getCodexUsageState({ force = false } = {}) {
   const configKey = codexUsageConfigKey(usageConfig);
   const cache = await loadCodexUsageCache();
   if (!force && isFreshCodexUsageCache(cache, configKey)) {
-    if (cache.result?.report) enrichCodexUsageCosts(cache.result.report);
     return cache.result;
   }
 
@@ -407,7 +412,8 @@ async function buildCodexUsageState(usageConfig) {
   if (!report || typeof report !== "object" || !report.summary) {
     throw Object.assign(new Error("Codex Token 报告 JSON 结构不完整"), { codexUsageStatus: "error" });
   }
-  enrichCodexUsageCosts(report);
+  const usageDetails = await loadCodexTokenUsageDetails(usageConfig);
+  enrichCodexUsageCosts(report, usageDetails);
   await writeJson(jsonPath, report);
   return {
     status: "ok",
@@ -445,7 +451,8 @@ async function generateCodexUsageHtmlReport() {
   });
 
   const report = JSON.parse(await readFile(jsonPath, "utf8"));
-  enrichCodexUsageCosts(report);
+  const usageDetails = await loadCodexTokenUsageDetails(usageConfig);
+  enrichCodexUsageCosts(report, usageDetails);
   await writeJson(jsonPath, report);
   const result = {
     status: "ok",
@@ -534,32 +541,337 @@ function assertReadablePath(filePath, label) {
   }
 }
 
-function enrichCodexUsageCosts(report) {
+async function loadCodexTokenUsageDetails(usageConfig) {
+  const paths = resolveCodexUsagePaths(usageConfig);
+  const codexHomes = uniquePaths([
+    path.dirname(paths.dbPath),
+    resolveUserPath(process.env.CODEX_HOME || "~/.codex", "~/.codex")
+  ]);
+  const files = [];
+  for (const homeDir of codexHomes) {
+    for (const dirName of CODEX_SESSION_DIRS) {
+      files.push(...await listJsonlFiles(path.join(homeDir, dirName)));
+    }
+  }
+
+  const byThreadId = new Map();
+  for (const filePath of uniquePaths(files)) {
+    const record = await readCodexSessionUsage(filePath);
+    if (!record?.threadId || !record.usageSplit?.total_tokens) continue;
+    const previous = byThreadId.get(record.threadId);
+    if (!previous || String(record.lastEventAt || "") >= String(previous.lastEventAt || "")) {
+      byThreadId.set(record.threadId, record);
+    }
+  }
+
+  const records = [...byThreadId.values()];
+  const indexes = buildCodexUsageIndexes(records);
+  return {
+    records,
+    byThreadId,
+    ...indexes,
+    coverage: {
+      source: "rollout_jsonl_token_count",
+      session_files: files.length,
+      split_threads: records.length,
+      split_tokens: indexes.total.usageSplit.total_tokens,
+      input_tokens: indexes.total.usageSplit.input_tokens,
+      cached_input_tokens: indexes.total.usageSplit.cached_input_tokens,
+      output_tokens: indexes.total.usageSplit.output_tokens,
+      reasoning_output_tokens: indexes.total.usageSplit.reasoning_output_tokens
+    }
+  };
+}
+
+async function listJsonlFiles(rootDir) {
+  let entries;
+  try {
+    entries = await readdir(rootDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const entry of entries) {
+    const filePath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listJsonlFiles(filePath));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jsonl")) {
+      files.push(filePath);
+    }
+  }
+  return files;
+}
+
+async function readCodexSessionUsage(filePath) {
+  let text;
+  try {
+    text = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let threadId = threadIdFromRolloutPath(filePath);
+  let source = "";
+  let model = "";
+  let provider = "";
+  let created = rolloutDateFromPath(filePath);
+  let finalUsage = null;
+  let lastEventAt = "";
+  let tokenCountEvents = 0;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (
+      !line.includes("token_count") &&
+      !line.includes("session_meta") &&
+      !line.includes("turn_context")
+    ) {
+      continue;
+    }
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = event && typeof event === "object" ? event.payload : null;
+    if (!payload || typeof payload !== "object") continue;
+
+    if (event.type === "session_meta") {
+      if (payload.id) threadId = String(payload.id);
+      if (payload.source) source = String(payload.source);
+      if (payload.model_provider) provider = String(payload.model_provider);
+      if (payload.timestamp && !created) created = localDatePartsFromTimestamp(payload.timestamp);
+      continue;
+    }
+
+    if (event.type === "turn_context") {
+      if (payload.model) model = String(payload.model);
+      continue;
+    }
+
+    if (payload.type === "token_count") {
+      const usage = extractTokenUsage(payload);
+      if (!usage) continue;
+      finalUsage = usage;
+      lastEventAt = String(event.timestamp || lastEventAt || "");
+      tokenCountEvents += 1;
+    }
+  }
+
+  if (!threadId || !finalUsage) return null;
+  const day = created?.day || "";
+  return {
+    threadId,
+    filePath,
+    day,
+    month: day ? day.slice(0, 7) : "",
+    source,
+    sourceLabel: sourceLabel(source),
+    model,
+    modelKey: normalizeModelKey(model),
+    provider,
+    usageSplit: finalUsage,
+    tokens: finalUsage.total_tokens,
+    lastEventAt,
+    tokenCountEvents
+  };
+}
+
+function extractTokenUsage(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  const direct = normalizeTokenUsage(value.total_token_usage || value.token_usage);
+  if (direct) return direct;
+  return extractTokenUsage(value.info, depth + 1) || extractTokenUsage(value.payload, depth + 1);
+}
+
+function normalizeTokenUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  const usage = {
+    input_tokens: nonnegativeInteger(value.input_tokens),
+    cached_input_tokens: nonnegativeInteger(value.cached_input_tokens),
+    output_tokens: nonnegativeInteger(value.output_tokens),
+    reasoning_output_tokens: nonnegativeInteger(value.reasoning_output_tokens),
+    total_tokens: nonnegativeInteger(value.total_tokens)
+  };
+  if (!usage.total_tokens && (usage.input_tokens || usage.output_tokens)) {
+    usage.total_tokens = usage.input_tokens + usage.output_tokens;
+  }
+  return usage.total_tokens ? usage : null;
+}
+
+function buildCodexUsageIndexes(records) {
+  const indexes = {
+    total: createUsageGroup(),
+    byMonth: new Map(),
+    byDay: new Map(),
+    byModel: new Map(),
+    bySource: new Map()
+  };
+  for (const record of records) {
+    addRecordToGroup(indexes.total, record);
+    addRecordToIndex(indexes.byMonth, record.month, record);
+    addRecordToIndex(indexes.byDay, record.day, record);
+    addRecordToIndex(indexes.byModel, record.modelKey || normalizeModelKey(record.model), record);
+    addRecordToIndex(indexes.bySource, record.sourceLabel || sourceLabel(record.source), record);
+  }
+  return indexes;
+}
+
+function createUsageGroup() {
+  return {
+    records: [],
+    usageSplit: {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 0
+    }
+  };
+}
+
+function addRecordToIndex(index, key, record) {
+  if (!key) return;
+  if (!index.has(key)) index.set(key, createUsageGroup());
+  addRecordToGroup(index.get(key), record);
+}
+
+function addRecordToGroup(group, record) {
+  group.records.push(record);
+  addUsageSplit(group.usageSplit, record.usageSplit);
+}
+
+function addUsageSplit(target, source) {
+  if (!target || !source) return target;
+  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]) {
+    target[key] = nonnegativeInteger(target[key]) + nonnegativeInteger(source[key]);
+  }
+  return target;
+}
+
+function uniquePaths(values) {
+  return [...new Set(values.filter(Boolean).map((value) => path.resolve(String(value))))];
+}
+
+function threadIdFromRolloutPath(filePath) {
+  const match = path.basename(filePath).match(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/i);
+  return match ? match[1] : "";
+}
+
+function rolloutDateFromPath(filePath) {
+  const match = path.basename(filePath).match(/^rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-/i);
+  if (!match) return null;
+  return {
+    day: match[1],
+    localDateTime: `${match[1]}T${match[2]}:${match[3]}:${match[4]}`
+  };
+}
+
+function localDatePartsFromTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return { day: local.toISOString().slice(0, 10) };
+}
+
+function sourceLabel(value) {
+  const source = String(value || "").trim();
+  if (!source) return "未知来源";
+  if (source.startsWith("{")) return "子 Agent";
+  return CODEX_SOURCE_LABELS[source.toLowerCase()] || source;
+}
+
+function nonnegativeInteger(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.round(number);
+}
+
+function enrichCodexUsageCosts(report, usageDetails = null) {
   if (!report || typeof report !== "object") return report;
+  const splitCoverage = codexUsageSplitCoverage(usageDetails, report.summary?.total_tokens);
+  const effectiveUsageDetails = splitCoverage?.full_coverage ? usageDetails : null;
   report.pricing = {
     source: OPENAI_PRICE_SOURCE,
-    models: MODEL_PRICING_USD_PER_MILLION
+    models: MODEL_PRICING_USD_PER_MILLION,
+    split_coverage: splitCoverage
   };
 
-  annotateCostCollections(report.models);
-  annotateCostCollections(report.top_sessions);
-  report.summary.cost_estimate = aggregateCostEstimate(report.models, report.summary.total_tokens);
+  annotateAggregateRows(report.models, effectiveUsageDetails?.byModel, "model");
+  annotateAggregateRows(report.sources, effectiveUsageDetails?.bySource, "source");
+  annotateSessionCosts(report.top_sessions, effectiveUsageDetails);
+  annotateGroupCost(report.summary, effectiveUsageDetails?.total, () => aggregateCostEstimate(report.models, report.summary.total_tokens));
 
   for (const view of report.month_views || []) {
-    annotateCostCollections(view.models);
-    annotateCostCollections(view.top_sessions);
-    view.cost_estimate = aggregateCostEstimate(view.models, view.tokens);
-    annotateDailyCosts(view.days, view.cost_estimate, view.tokens);
+    const monthGroup = effectiveUsageDetails?.byMonth?.get(view.month);
+    annotateAggregateRows(view.models, groupIndex(monthGroup, "model"), "model");
+    annotateAggregateRows(view.sources, groupIndex(monthGroup, "source"), "source");
+    annotateSessionCosts(view.top_sessions, effectiveUsageDetails);
+    annotateGroupCost(view, monthGroup, () => aggregateCostEstimate(view.models, view.tokens));
+    annotateDailyCosts(view.days, effectiveUsageDetails, view.cost_estimate, view.tokens);
   }
-  annotateDailyCosts(report.daily, report.summary.cost_estimate, report.summary.total_tokens);
+  annotateDailyCosts(report.daily, effectiveUsageDetails, report.summary.cost_estimate, report.summary.total_tokens);
   return report;
 }
 
-function annotateCostCollections(items) {
+function codexUsageSplitCoverage(usageDetails, reportTokens) {
+  if (!usageDetails?.coverage) return null;
+  const reportTotal = nonnegativeInteger(reportTokens);
+  const splitTotal = nonnegativeInteger(usageDetails.coverage.split_tokens);
+  const tokenDelta = Math.abs(splitTotal - reportTotal);
+  const tolerance = Math.max(1000, Math.round(reportTotal * 0.002));
+  return {
+    ...usageDetails.coverage,
+    report_tokens: reportTotal,
+    token_delta: tokenDelta,
+    full_coverage: splitTotal > 0 && (!reportTotal || tokenDelta <= tolerance)
+  };
+}
+
+function annotateAggregateRows(items, index, keyType) {
   if (!Array.isArray(items)) return;
   for (const item of items) {
-    item.cost_estimate = costEstimateForTokens(item.tokens, item.model);
+    const key = keyType === "model"
+      ? normalizeModelKey(item.model)
+      : String(item.source || "").trim();
+    const group = index?.get(key);
+    annotateGroupCost(item, group, () => costEstimateForTokens(item.tokens, item.model));
   }
+}
+
+function annotateSessionCosts(items, usageDetails) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    const record = item?.id ? usageDetails?.byThreadId?.get(item.id) : null;
+    if (record) {
+      item.usage_split = usageSplitPayload(record.usageSplit);
+      item.cost_estimate = costEstimateForUsageSplit(record.usageSplit, item.model || record.model);
+    } else {
+      item.cost_estimate = costEstimateForTokens(item.tokens, item.model);
+    }
+  }
+}
+
+function annotateGroupCost(target, group, fallbackFactory) {
+  if (!target || typeof target !== "object") return;
+  if (group?.usageSplit?.total_tokens) {
+    target.usage_split = usageSplitPayload(group.usageSplit);
+    target.cost_estimate = aggregateSplitCost(group.records);
+    return;
+  }
+  target.cost_estimate = fallbackFactory ? fallbackFactory() : null;
+}
+
+function groupIndex(parentGroup, keyType) {
+  if (!parentGroup?.records?.length) return null;
+  const index = new Map();
+  for (const record of parentGroup.records) {
+    const key = keyType === "model"
+      ? record.modelKey || normalizeModelKey(record.model)
+      : record.sourceLabel || sourceLabel(record.source);
+    addRecordToIndex(index, key, record);
+  }
+  return index;
 }
 
 function aggregateCostEstimate(modelRows, fallbackTokens = 0) {
@@ -593,8 +905,17 @@ function aggregateCostEstimate(modelRows, fallbackTokens = 0) {
   });
 }
 
-function annotateDailyCosts(days, aggregate, totalTokens) {
-  if (!Array.isArray(days) || !aggregate || !aggregate.priced_tokens) return;
+function annotateDailyCosts(days, usageDetails, aggregate, totalTokens) {
+  if (!Array.isArray(days)) return;
+  let hasSplit = false;
+  for (const day of days) {
+    const group = usageDetails?.byDay?.get(day.day);
+    if (!group?.usageSplit?.total_tokens) continue;
+    hasSplit = true;
+    day.usage_split = usageSplitPayload(group.usageSplit);
+    day.cost_estimate = aggregateSplitCost(group.records);
+  }
+  if (hasSplit || !aggregate || !aggregate.priced_tokens) return;
   const denominator = Math.max(1, Math.round(toNumber(totalTokens, 0)));
   const lowRate = aggregate.low_usd / denominator;
   const highRate = aggregate.high_usd / denominator;
@@ -612,6 +933,74 @@ function annotateDailyCosts(days, aggregate, totalTokens) {
   }
 }
 
+function aggregateSplitCost(records) {
+  const rows = Array.isArray(records) ? records : [];
+  let total = 0;
+  let pricedTokens = 0;
+  let unpricedTokens = 0;
+  const usageSplit = createUsageGroup().usageSplit;
+  const components = {
+    input_usd: 0,
+    cached_input_usd: 0,
+    output_usd: 0
+  };
+  for (const record of rows) {
+    addUsageSplit(usageSplit, record.usageSplit);
+    const estimate = costEstimateForUsageSplit(record.usageSplit, record.model);
+    if (!estimate) {
+      unpricedTokens += nonnegativeInteger(record.usageSplit?.total_tokens);
+      continue;
+    }
+    total += estimate.midpoint_usd;
+    pricedTokens += estimate.priced_tokens;
+    components.input_usd += estimate.components?.input_usd || 0;
+    components.cached_input_usd += estimate.components?.cached_input_usd || 0;
+    components.output_usd += estimate.components?.output_usd || 0;
+  }
+  return formatCostEstimate({
+    low: total,
+    high: total,
+    midpoint: total,
+    pricedTokens,
+    unpricedTokens,
+    model: rows.length === 1 ? rows[0]?.model : "mixed",
+    usageSplit,
+    components,
+    exact: unpricedTokens === 0,
+    basis: "split_token_usage"
+  });
+}
+
+function costEstimateForUsageSplit(usageSplit, modelValue) {
+  const usage = normalizeTokenUsage(usageSplit);
+  const modelKey = normalizeModelKey(modelValue);
+  const pricing = MODEL_PRICING_USD_PER_MILLION[modelKey];
+  if (!usage?.total_tokens || !pricing) return null;
+  const cachedInput = Math.min(usage.cached_input_tokens, usage.input_tokens);
+  const uncachedInput = Math.max(0, usage.input_tokens - cachedInput);
+  const inputCost = uncachedInput / 1_000_000 * pricing.input;
+  const cachedInputCost = cachedInput / 1_000_000 * (pricing.cachedInput ?? pricing.input);
+  const outputCost = usage.output_tokens / 1_000_000 * pricing.output;
+  const total = inputCost + cachedInputCost + outputCost;
+  return formatCostEstimate({
+    low: total,
+    high: total,
+    midpoint: total,
+    pricedTokens: usage.total_tokens,
+    unpricedTokens: 0,
+    model: modelKey,
+    rates: pricing,
+    usageSplit: usage,
+    components: {
+      input_usd: roundCurrency(inputCost),
+      cached_input_usd: roundCurrency(cachedInputCost),
+      output_usd: roundCurrency(outputCost)
+    },
+    exact: true,
+    basis: "split_token_usage"
+  });
+}
+
 function costEstimateForTokens(tokensValue, modelValue) {
   const tokens = Math.max(0, Math.round(toNumber(tokensValue, 0)));
   const modelKey = normalizeModelKey(modelValue);
@@ -626,7 +1015,8 @@ function costEstimateForTokens(tokensValue, modelValue) {
     pricedTokens: tokens,
     unpricedTokens: 0,
     model: modelKey,
-    rates: pricing
+    rates: pricing,
+    basis: "estimated_total_tokens_range"
   });
 }
 
@@ -634,17 +1024,34 @@ function formatCostEstimate(data) {
   const low = Math.min(data.low || 0, data.high || 0);
   const high = Math.max(data.low || 0, data.high || 0);
   const midpoint = data.midpoint ?? ((low + high) / 2);
+  const exact = Boolean(data.exact) || Math.abs(high - low) < 0.00005;
+  const display = exact ? formatUsd(midpoint) : `${formatUsd(low)}-${formatUsd(high)}`;
   return {
     model: data.model || "",
     rates: data.rates || null,
+    usage_split: data.usageSplit ? usageSplitPayload(data.usageSplit) : null,
+    components: data.components || null,
     low_usd: roundCurrency(low),
     high_usd: roundCurrency(high),
     midpoint_usd: roundCurrency(midpoint),
-    range_display: `${formatUsd(low)}-${formatUsd(high)}`,
+    range_display: display,
+    display,
     midpoint_display: formatUsd(midpoint),
     priced_tokens: Math.max(0, Math.round(toNumber(data.pricedTokens, 0))),
     unpriced_tokens: Math.max(0, Math.round(toNumber(data.unpricedTokens, 0))),
-    basis: "estimated_total_tokens_range"
+    exact,
+    basis: data.basis || "estimated_total_tokens_range"
+  };
+}
+
+function usageSplitPayload(usageSplit) {
+  const usage = normalizeTokenUsage(usageSplit) || createUsageGroup().usageSplit;
+  return {
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    reasoning_output_tokens: usage.reasoning_output_tokens,
+    total_tokens: usage.total_tokens
   };
 }
 

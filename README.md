@@ -131,7 +131,7 @@ output/codex-usage/latest.html
 
 该目录已被 `.gitignore` 排除，不会进入公开仓库。
 
-费用估算使用 OpenAI API Pricing 的标准输入 / 输出 token 价格。由于 Codex `state_5.sqlite` 当前只提供 `threads.tokens_used` 总量，面板显示的是费用区间，不是精确账单；该区间未扣除缓存、Batch、Regional、长上下文或工具费用差异。高消耗会话默认收起。
+费用估算使用 OpenAI API Pricing 的标准输入 / 缓存输入 / 输出 token 价格。`state_5.sqlite` 仍只提供 `threads.tokens_used` 总量，面板会额外读取本机 rollout JSONL 里的 `token_count.total_token_usage`，优先按输入、缓存输入和输出拆分计算；拆分缺失时才回退到总 token 区间估算。该估算不是 OpenAI 账单，未计入 Batch、Regional、长上下文或工具费用差异。高消耗会话默认收起。
 
 ## 端点探测
 
