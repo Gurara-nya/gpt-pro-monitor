@@ -168,7 +168,7 @@ function renderHistory() {
     return date >= period.start && date < period.end;
   });
   renderHistoryControls(period);
-  renderHistoryChart(periodChecks);
+  renderHistoryChart(periodChecks, period);
   renderHistoryList(periodChecks.slice().reverse());
 }
 
@@ -187,35 +187,141 @@ function renderHistoryControls(period) {
   }
 }
 
-function renderHistoryChart(checks) {
-  if (!checks.length) {
-    $("#historyChart").innerHTML = `<div class="empty-state">当前视图暂无同步历史</div>`;
+function renderHistoryChart(checks, period) {
+  const chart = $("#historyChart");
+  chart.className = `history-chart ${period.mode}-chart`;
+  if (period.mode === "month") {
+    chart.innerHTML = renderMonthCalendar(checks, period);
     return;
   }
+  const buckets = period.mode === "day"
+    ? buildDayBuckets(checks, period)
+    : buildWeekBuckets(checks, period);
+  chart.innerHTML = buckets.map(renderHistoryBucket).join("");
+}
 
-  $("#historyChart").innerHTML = checks.map((check) => {
-    const primary = check.usage?.primaryWindow;
-    const secondary = check.usage?.secondaryWindow;
-    const p = safePercent(primary?.remainingPercent);
-    const s = safePercent(secondary?.remainingPercent);
-    const title = `${formatFullDateTime(check.at)} · 5H ${formatPercent(p)} · WEEK ${formatPercent(s)}`;
+function buildWeekBuckets(checks, period) {
+  const labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  return Array.from({ length: 7 }, (_, index) => {
+    const start = addDays(period.start, index);
+    const end = addDays(start, 1);
+    return {
+      label: labels[index],
+      sublabel: formatShortDate(start),
+      check: lastCheckInRange(checks, start, end)
+    };
+  });
+}
 
+function buildDayBuckets(checks, period) {
+  return Array.from({ length: 12 }, (_, index) => {
+    const start = new Date(period.start.getTime() + index * 2 * 60 * 60 * 1000);
+    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+    return {
+      label: `${pad2(index * 2)}:00`,
+      sublabel: `${pad2(index * 2)}-${pad2(index * 2 + 2)}`,
+      check: lastCheckInRange(checks, start, end)
+    };
+  });
+}
+
+function lastCheckInRange(checks, start, end) {
+  let last = null;
+  for (const check of checks) {
+    const date = new Date(check.at);
+    if (date >= start && date < end) last = check;
+  }
+  return last;
+}
+
+function renderHistoryBucket(bucket) {
+  const check = bucket.check;
+  if (!check) {
     return `
-      <button class="history-point ${escapeAttr(check.status)}" type="button" aria-label="${escapeAttr(title)}">
-        <span class="point-stem">
-          <i class="bar-primary" style="height:${p}%"></i>
-          <i class="bar-secondary" style="height:${s}%"></i>
-        </span>
-        <span class="point-dot"></span>
-        <span class="point-tooltip" role="presentation">
-          <strong>${escapeHtml(formatFullDateTime(check.at))}</strong>
-          <small>${escapeHtml(REASON_TEXT[check.reason] || check.reason || "手动")} · ${escapeHtml(STATUS_TEXT[check.status] || check.status)}</small>
-          ${tooltipBar("5H", p, primary)}
-          ${tooltipBar("WEEK", s, secondary)}
-        </span>
-      </button>
+      <div class="history-bucket empty">
+        <span class="bucket-bars"></span>
+        <span class="bucket-label">${escapeHtml(bucket.label)}</span>
+        <small>${escapeHtml(bucket.sublabel)}</small>
+      </div>
     `;
-  }).join("");
+  }
+  const primary = check.usage?.primaryWindow;
+  const secondary = check.usage?.secondaryWindow;
+  const p = safePercent(primary?.remainingPercent);
+  const s = safePercent(secondary?.remainingPercent);
+  const title = `${bucket.label} ${bucket.sublabel} · ${formatFullDateTime(check.at)} · 5H ${formatPercent(p)} · WEEK ${formatPercent(s)}`;
+  return `
+    <button class="history-bucket ${escapeAttr(check.status)}" type="button" aria-label="${escapeAttr(title)}">
+      <span class="bucket-bars">
+        <i class="bar-primary" style="height:${p}%"></i>
+        <i class="bar-secondary" style="height:${s}%"></i>
+      </span>
+      <span class="point-dot"></span>
+      <span class="bucket-label">${escapeHtml(bucket.label)}</span>
+      <small>${escapeHtml(bucket.sublabel)}</small>
+      ${renderPointTooltip(check)}
+    </button>
+  `;
+}
+
+function renderMonthCalendar(checks, period) {
+  const dayNames = ["一", "二", "三", "四", "五", "六", "日"];
+  const days = [];
+  const leading = (period.start.getDay() || 7) - 1;
+  for (let i = 0; i < leading; i += 1) days.push(`<div class="calendar-day blank"></div>`);
+  for (let date = new Date(period.start); date < period.end; date = addDays(date, 1)) {
+    const start = new Date(date);
+    const end = addDays(start, 1);
+    days.push(renderCalendarDay(start, lastCheckInRange(checks, start, end)));
+  }
+  return `
+    <div class="calendar-weekdays">
+      ${dayNames.map((day) => `<span>${day}</span>`).join("")}
+    </div>
+    <div class="calendar-grid">
+      ${days.join("")}
+    </div>
+  `;
+}
+
+function renderCalendarDay(date, check) {
+  if (!check) {
+    return `
+      <div class="calendar-day empty">
+        <span>${date.getDate()}</span>
+        <i class="calendar-ring empty-ring"></i>
+      </div>
+    `;
+  }
+  const primary = check.usage?.primaryWindow;
+  const secondary = check.usage?.secondaryWindow;
+  const p = safePercent(primary?.remainingPercent);
+  const s = safePercent(secondary?.remainingPercent);
+  const title = `${formatDateOnly(date)} · ${formatFullDateTime(check.at)} · 5H ${formatPercent(p)} · WEEK ${formatPercent(s)}`;
+  return `
+    <button class="calendar-day has-data ${escapeAttr(check.status)}" type="button" aria-label="${escapeAttr(title)}">
+      <span>${date.getDate()}</span>
+      <i class="calendar-ring" style="--primary:${p}; --secondary:${s}">
+        <em></em>
+      </i>
+      ${renderPointTooltip(check)}
+    </button>
+  `;
+}
+
+function renderPointTooltip(check) {
+  const primary = check.usage?.primaryWindow;
+  const secondary = check.usage?.secondaryWindow;
+  const p = safePercent(primary?.remainingPercent);
+  const s = safePercent(secondary?.remainingPercent);
+  return `
+    <span class="point-tooltip" role="presentation">
+      <strong>${escapeHtml(formatFullDateTime(check.at))}</strong>
+      <small>${escapeHtml(REASON_TEXT[check.reason] || check.reason || "手动")} · ${escapeHtml(STATUS_TEXT[check.status] || check.status)}</small>
+      ${tooltipBar("5H", p, primary)}
+      ${tooltipBar("WEEK", s, secondary)}
+    </span>
+  `;
 }
 
 function tooltipBar(label, remaining, window) {
@@ -483,6 +589,17 @@ function formatDateOnly(value) {
     month: "2-digit",
     day: "2-digit"
   }).format(value);
+}
+
+function formatShortDate(value) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit"
+  }).format(value);
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
 }
 
 function escapeHtml(value) {
