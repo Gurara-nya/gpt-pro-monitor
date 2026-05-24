@@ -226,10 +226,21 @@ function normalizeCheck(check) {
     message: String(check.message || statusText(status)).slice(0, 300),
     latencyMs: Math.max(0, Math.round(toNumber(check.latencyMs, 0))),
     planType: String(check.planType || "").slice(0, 80),
+    account: normalizeAccount(check.account),
     allowed: check.allowed === undefined ? null : Boolean(check.allowed),
     limitReached: check.limitReached === undefined ? null : Boolean(check.limitReached),
     usage: check.usage && typeof check.usage === "object" ? check.usage : null,
     detail: check.detail && typeof check.detail === "object" ? check.detail : {}
+  };
+}
+
+function normalizeAccount(account) {
+  if (!account || typeof account !== "object") return null;
+  return {
+    name: String(account.name || "").slice(0, 120),
+    email: String(account.email || "").slice(0, 200),
+    userId: String(account.userId || "").slice(0, 120),
+    accountId: String(account.accountId || "").slice(0, 120)
   };
 }
 
@@ -283,6 +294,7 @@ function computeStats(config, checks, now = new Date()) {
     failed: checks.filter((check) => check.status === "failed" || check.status === "auth_error").length,
     limited: checks.filter((check) => check.status === "quota_limited").length,
     quota: latest?.usage || null,
+    account: latest?.account || null,
     deltas: computeDeltas(latest?.usage, previous?.usage),
     timeline: checks.slice(-48).map((check) => ({
       id: check.id,
@@ -437,11 +449,18 @@ async function fetchCodexUsage(config) {
       : [],
     credits: readCredits(payload.credits)
   };
+  const account = normalizeAccount({
+    name: auth.profile?.name,
+    email: payload.email || auth.profile?.email,
+    userId: payload.user_id || auth.profile?.userId,
+    accountId: payload.account_id || auth.accountId
+  });
 
   return {
     status: limitReached ? "quota_limited" : "success",
     message: limitReached ? statusText("quota_limited") : statusText("success"),
     planType: usage.planType,
+    account,
     allowed: usage.allowed,
     limitReached: usage.limitReached,
     usage,
@@ -466,6 +485,7 @@ async function loadCodexAuth(authPath) {
   return {
     accessToken,
     accountId,
+    profile: readAuthProfile(auth),
     tokenExpiresAt: readJwtExpiration(accessToken)
   };
 }
@@ -478,12 +498,28 @@ function resolveUserPath(value) {
 }
 
 function readJwtExpiration(token) {
+  const payload = readJwtPayload(token);
+  return payload?.exp ? new Date(payload.exp * 1000).toISOString() : null;
+}
+
+function readAuthProfile(auth) {
+  const idPayload = readJwtPayload(auth.tokens?.id_token);
+  const accessPayload = readJwtPayload(auth.tokens?.access_token);
+  return {
+    name: idPayload?.name || "",
+    email: idPayload?.email || accessPayload?.["https://api.openai.com/profile"]?.email || "",
+    userId: idPayload?.["https://api.openai.com/auth"]?.chatgpt_user_id ||
+      accessPayload?.["https://api.openai.com/auth"]?.chatgpt_user_id ||
+      ""
+  };
+}
+
+function readJwtPayload(token) {
   try {
     const part = String(token).split(".")[1];
     if (!part) return null;
     const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
-    const payload = JSON.parse(Buffer.from(normalized, "base64").toString("utf8"));
-    return payload.exp ? new Date(payload.exp * 1000).toISOString() : null;
+    return JSON.parse(Buffer.from(normalized, "base64").toString("utf8"));
   } catch {
     return null;
   }

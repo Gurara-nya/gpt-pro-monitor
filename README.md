@@ -72,6 +72,30 @@ $env:GPT_MONITOR_PORT = "8787"
 
 建议在公网前再套一层 HTTPS 反向代理，例如 Caddy、Nginx 或 Cloudflare Tunnel。不要把 `~/.codex/auth.json`、`.env`、`data/` 或任何 token 提交到 GitHub。
 
+## 使用 cpolar 穿透
+
+cpolar 客户端运行在同一台电脑上时，服务可以继续只监听本机地址。推荐这样启动监控服务：
+
+```powershell
+$env:GPT_MONITOR_ACCESS_TOKEN = "<用 npm run secret 生成的长密钥>"
+npm start
+```
+
+然后另开一个终端创建 HTTP 隧道：
+
+```powershell
+cpolar http 8787
+```
+
+cpolar 输出里的 `Forwarding` 地址就是公网访问地址。用其他电脑或手机访问这个 `https://...cpolar...` 地址时，浏览器会弹出登录框：
+
+```text
+用户名：monitor
+密码：GPT_MONITOR_ACCESS_TOKEN 的值
+```
+
+如果你配置了 cpolar 固定域名或后台隧道，目标仍然指向本机 `8787` 端口即可。
+
 ## 安全措施
 
 - 默认只绑定 `127.0.0.1`

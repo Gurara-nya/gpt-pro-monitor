@@ -146,7 +146,6 @@ button {
   text-transform: uppercase;
 }
 
-.brand h1,
 .dialog-head h2 {
   margin: 0;
   font-size: 1.08rem;
@@ -160,6 +159,7 @@ button {
   flex-wrap: wrap;
 }
 
+.user-badge,
 .plan-badge,
 .status-badge {
   min-height: 24px;
@@ -483,11 +483,11 @@ main {
 }
 
 .point-stem {
-  width: 10px;
+  width: 18px;
   height: 62px;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2px;
+  gap: 3px;
   align-items: end;
 }
 
@@ -883,10 +883,6 @@ input[type="color"] {
 
   .topbar {
     align-items: flex-start;
-  }
-
-  .brand h1 {
-    font-size: 0.98rem;
   }
 
   .window-card,

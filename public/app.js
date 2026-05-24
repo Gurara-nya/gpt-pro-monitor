@@ -17,7 +17,7 @@ const PLAN_TEXT = {
   free: "ChatGPT Free",
   plus: "ChatGPT Plus",
   pro: "ChatGPT Pro",
-  prolite: "ChatGPT Pro",
+  prolite: "Pro Lite",
   team: "ChatGPT Team",
   enterprise: "ChatGPT Enterprise",
   edu: "ChatGPT Edu"
@@ -130,10 +130,13 @@ function renderHeader() {
   const latest = computed.latestCheck;
   const status = computed.status || "unknown";
   const rawPlan = latest?.planType || computed.quota?.planType || state.config.account?.planName;
+  const account = latest?.account || computed.account || {};
   $("#statusBadge").textContent = STATUS_TEXT[status] || status;
   $("#statusBadge").className = `status-badge ${status}`;
   $("#planBadge").textContent = formatPlanName(rawPlan);
   $("#planBadge").title = rawPlan ? `plan_type: ${rawPlan}` : "";
+  $("#userBadge").textContent = formatUserName(account);
+  $("#userBadge").title = account.email || account.name || account.userId || "";
   $("#lastSync").textContent = latest ? formatDateTime(latest.at) : "--";
   $("#nextRun").textContent = computed.nextRunAt ? formatDateTime(computed.nextRunAt) : "关闭";
 }
@@ -427,6 +430,16 @@ function formatPlanName(value) {
   if (!raw) return "--";
   const friendly = PLAN_TEXT[raw.toLowerCase()];
   return friendly || raw;
+}
+
+function formatUserName(account) {
+  const name = String(account?.name || "").trim();
+  if (name) return name;
+  const email = String(account?.email || "").trim();
+  if (email) return email.split("@")[0] || email;
+  const userId = String(account?.userId || "").trim();
+  if (userId) return userId.replace(/^user-/, "").slice(0, 12);
+  return "--";
 }
 
 function safePercent(value) {
