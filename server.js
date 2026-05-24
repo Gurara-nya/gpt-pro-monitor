@@ -2,25 +2,58 @@ const http = require("node:http");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const { execFile } = require("node:child_process");
 const { existsSync } = require("node:fs");
 const { mkdir, readFile, rename, writeFile } = require("node:fs/promises");
+const { promisify } = require("node:util");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
 const PUBLIC_DIR = path.join(ROOT, "public");
+const OUTPUT_DIR = path.join(ROOT, "output");
+const CODEX_USAGE_OUTPUT_DIR = path.join(OUTPUT_DIR, "codex-usage");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 const CHECKS_FILE = path.join(DATA_DIR, "checks.json");
+const CODEX_USAGE_CACHE_FILE = path.join(DATA_DIR, "codex-usage-cache.json");
 const DEFAULT_PORT = 8787;
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CHECK_HISTORY = 1000;
+const CODEX_USAGE_CACHE_MS = 5 * 60 * 1000;
+const CODEX_USAGE_SCRIPT = path.join("scripts", "generate_codex_usage_report.py");
+const CODEX_USAGE_REPORT_FILE = "latest.html";
+const CODEX_USAGE_JSON_FILE = "latest.json";
+const CODEX_USAGE_MD_FILE = "latest.md";
 const DEFAULT_HOST = "127.0.0.1";
 const AUTH_REALM = "GPT Pro Monitor";
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX = 240;
 const REFRESH_RATE_LIMIT_MAX = 12;
+const execFileAsync = promisify(execFile);
 const ALLOWED_USAGE_ENDPOINTS = [
   "https://chatgpt.com/backend-api/wham/usage"
 ];
+const OPENAI_PRICE_SOURCE = {
+  name: "OpenAI API Pricing",
+  url: "https://openai.com/api/pricing/",
+  checkedAt: "2026-05-24",
+  unit: "USD / 1M tokens",
+  note: "Codex state_5.sqlite 只提供 threads.tokens_used 总量；费用按总 token 分别套用输入价和输出价形成区间，未扣除缓存、Batch、Regional、长上下文或工具费用差异。"
+};
+const MODEL_PRICING_USD_PER_MILLION = {
+  "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 },
+  "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15 },
+  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
+  "gpt-5.4-nano": { input: 0.2, cachedInput: 0.02, output: 1.25 },
+  "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.2-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.1-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5.2": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.1": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5-mini": { input: 0.25, cachedInput: 0.025, output: 2 },
+  "gpt-5-nano": { input: 0.05, cachedInput: 0.005, output: 0.4 }
+};
 const SECURITY_HEADERS = {
   "Content-Security-Policy": [
     "default-src 'self'",
@@ -58,6 +91,12 @@ const DEFAULT_CONFIG = {
     intervalMinutes: 30,
     lastRunAt: null,
     nextRunAt: null
+  },
+  codexUsage: {
+    enabled: true,
+    dbPath: "~/.codex/state_5.sqlite",
+    skillPath: "~/.codex/skills/codex-usage",
+    topSessions: 10
   },
   appearance: {
     accentColor: "#1d7f64",
@@ -150,6 +189,16 @@ function normalizeConfig(input) {
     nextRunAt: validIsoOrNull(schedule.nextRunAt)
   };
   if (!config.schedule.enabled) config.schedule.nextRunAt = null;
+
+  const codexUsage = source.codexUsage || {};
+  config.codexUsage = {
+    ...DEFAULT_CONFIG.codexUsage,
+    enabled: codexUsage.enabled !== false,
+    dbPath: cleanString(codexUsage.dbPath, DEFAULT_CONFIG.codexUsage.dbPath, 500) || DEFAULT_CONFIG.codexUsage.dbPath,
+    skillPath: cleanString(codexUsage.skillPath, DEFAULT_CONFIG.codexUsage.skillPath, 500) ||
+      DEFAULT_CONFIG.codexUsage.skillPath,
+    topSessions: clamp(Math.round(toNumber(codexUsage.topSessions, DEFAULT_CONFIG.codexUsage.topSessions)), 1, 50)
+  };
 
   const appearance = source.appearance || {};
   const accent = appearance.accentColor || appearance.seedColor || DEFAULT_CONFIG.appearance.accentColor;
@@ -277,6 +326,361 @@ async function getState() {
     computed: computeStats(config, checks),
     checks: checks.slice().reverse().slice(0, 200)
   };
+}
+
+async function getCodexUsageState({ force = false } = {}) {
+  const config = await loadConfig();
+  const usageConfig = config.codexUsage || DEFAULT_CONFIG.codexUsage;
+  if (!usageConfig.enabled) {
+    return {
+      status: "disabled",
+      generatedAt: new Date().toISOString(),
+      message: "Codex Token 消耗面板已停用",
+      report: null
+    };
+  }
+
+  const configKey = codexUsageConfigKey(usageConfig);
+  const cache = await loadCodexUsageCache();
+  if (!force && isFreshCodexUsageCache(cache, configKey)) {
+    if (cache.result?.report) enrichCodexUsageCosts(cache.result.report);
+    return cache.result;
+  }
+
+  try {
+    const result = await buildCodexUsageState(usageConfig);
+    await writeJson(CODEX_USAGE_CACHE_FILE, {
+      configKey,
+      cachedAt: result.generatedAt,
+      result
+    });
+    return result;
+  } catch (error) {
+    const generatedAt = new Date().toISOString();
+    if (cache?.result?.report) {
+      return {
+        ...cache.result,
+        status: "stale",
+        generatedAt,
+        message: `Codex Token 数据刷新失败，显示缓存：${error.message}`
+      };
+    }
+    return {
+      status: error.codexUsageStatus || "error",
+      generatedAt,
+      message: error.message || "Codex Token 数据不可用",
+      report: null
+    };
+  }
+}
+
+async function loadCodexUsageCache() {
+  const cache = await readJson(CODEX_USAGE_CACHE_FILE, null);
+  if (!cache || typeof cache !== "object" || !cache.result) return null;
+  return cache;
+}
+
+function isFreshCodexUsageCache(cache, configKey) {
+  if (!cache || cache.configKey !== configKey) return false;
+  const cachedAt = new Date(cache.cachedAt || cache.result.generatedAt || 0);
+  if (Number.isNaN(cachedAt.getTime())) return false;
+  return Date.now() - cachedAt.getTime() < CODEX_USAGE_CACHE_MS;
+}
+
+function codexUsageConfigKey(usageConfig) {
+  return JSON.stringify({
+    dbPath: usageConfig.dbPath,
+    skillPath: usageConfig.skillPath,
+    topSessions: usageConfig.topSessions
+  });
+}
+
+async function buildCodexUsageState(usageConfig) {
+  const jsonPath = path.join(DATA_DIR, "codex-usage-report.json");
+  await runCodexUsageReport(usageConfig, {
+    renderer: "data",
+    jsonPath,
+    noSnapshot: true,
+    timeoutMs: 45000
+  });
+  const report = JSON.parse(await readFile(jsonPath, "utf8"));
+  if (!report || typeof report !== "object" || !report.summary) {
+    throw Object.assign(new Error("Codex Token 报告 JSON 结构不完整"), { codexUsageStatus: "error" });
+  }
+  enrichCodexUsageCosts(report);
+  await writeJson(jsonPath, report);
+  return {
+    status: "ok",
+    generatedAt: new Date().toISOString(),
+    message: "Codex Token 数据已同步",
+    report
+  };
+}
+
+async function generateCodexUsageHtmlReport() {
+  const config = await loadConfig();
+  const usageConfig = config.codexUsage || DEFAULT_CONFIG.codexUsage;
+  if (!usageConfig.enabled) {
+    return {
+      status: "disabled",
+      generatedAt: new Date().toISOString(),
+      message: "Codex Token 消耗面板已停用",
+      reportUrl: null
+    };
+  }
+
+  await mkdir(CODEX_USAGE_OUTPUT_DIR, { recursive: true });
+  const htmlPath = path.join(CODEX_USAGE_OUTPUT_DIR, CODEX_USAGE_REPORT_FILE);
+  const jsonPath = path.join(CODEX_USAGE_OUTPUT_DIR, CODEX_USAGE_JSON_FILE);
+  const mdPath = path.join(CODEX_USAGE_OUTPUT_DIR, CODEX_USAGE_MD_FILE);
+  const snapshotPath = path.join(CODEX_USAGE_OUTPUT_DIR, "latest.snapshot.sqlite");
+
+  await runCodexUsageReport(usageConfig, {
+    renderer: "html-doc",
+    outPath: htmlPath,
+    jsonPath,
+    mdPath,
+    snapshotPath,
+    timeoutMs: 120000
+  });
+
+  const report = JSON.parse(await readFile(jsonPath, "utf8"));
+  enrichCodexUsageCosts(report);
+  await writeJson(jsonPath, report);
+  const result = {
+    status: "ok",
+    generatedAt: new Date().toISOString(),
+    message: "Codex Token HTML 报告已生成",
+    report
+  };
+  await writeJson(CODEX_USAGE_CACHE_FILE, {
+    configKey: codexUsageConfigKey(usageConfig),
+    cachedAt: result.generatedAt,
+    result
+  });
+
+  return {
+    status: "ok",
+    generatedAt: result.generatedAt,
+    message: result.message,
+    reportUrl: `/${CODEX_USAGE_OUTPUT_DIR.split(path.sep).pop()}/${CODEX_USAGE_REPORT_FILE}`,
+    outputPath: htmlPath
+  };
+}
+
+async function runCodexUsageReport(usageConfig, options) {
+  const paths = resolveCodexUsagePaths(usageConfig);
+  assertReadablePath(paths.dbPath, "Codex SQLite 数据库");
+  assertReadablePath(paths.skillScript, "codex-usage 生成脚本");
+
+  const args = [
+    paths.skillScript,
+    "--db",
+    paths.dbPath,
+    "--top",
+    String(usageConfig.topSessions),
+    "--renderer",
+    options.renderer
+  ];
+  if (options.outPath) args.push("--out", options.outPath);
+  if (options.jsonPath) args.push("--json-out", options.jsonPath);
+  if (options.mdPath) args.push("--md-out", options.mdPath);
+  if (options.snapshotPath) args.push("--snapshot", options.snapshotPath);
+  if (options.noSnapshot) args.push("--no-snapshot");
+  if (options.renderer === "html-doc") {
+    assertReadablePath(paths.htmlDocDir, "html-doc skill 目录");
+    args.push("--html-doc-dir", paths.htmlDocDir);
+  }
+
+  try {
+    await execFileAsync(process.env.PYTHON || "python", args, {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: options.timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8"
+      }
+    });
+  } catch (error) {
+    const details = String(error.stderr || error.stdout || error.message || "").trim();
+    const message = details || "codex-usage 脚本执行失败";
+    const status = error.code === "ENOENT" ? "unavailable" : "error";
+    throw Object.assign(new Error(message), { codexUsageStatus: status });
+  }
+}
+
+function resolveCodexUsagePaths(usageConfig) {
+  let skillDir = resolveUserPath(usageConfig.skillPath, DEFAULT_CONFIG.codexUsage.skillPath);
+  if (path.basename(skillDir).toLowerCase() === "skill.md") {
+    skillDir = path.dirname(skillDir);
+  }
+  const htmlDocDir = resolveUserPath(
+    process.env.HTML_DOC_SKILL_DIR || "~/.codex/skills/html-doc",
+    "~/.codex/skills/html-doc"
+  );
+  return {
+    dbPath: resolveUserPath(usageConfig.dbPath, DEFAULT_CONFIG.codexUsage.dbPath),
+    skillDir,
+    skillScript: path.join(skillDir, CODEX_USAGE_SCRIPT),
+    htmlDocDir
+  };
+}
+
+function assertReadablePath(filePath, label) {
+  if (!existsSync(filePath)) {
+    throw Object.assign(new Error(`${label}不存在：${filePath}`), { codexUsageStatus: "unavailable" });
+  }
+}
+
+function enrichCodexUsageCosts(report) {
+  if (!report || typeof report !== "object") return report;
+  report.pricing = {
+    source: OPENAI_PRICE_SOURCE,
+    models: MODEL_PRICING_USD_PER_MILLION
+  };
+
+  annotateCostCollections(report.models);
+  annotateCostCollections(report.top_sessions);
+  report.summary.cost_estimate = aggregateCostEstimate(report.models, report.summary.total_tokens);
+
+  for (const view of report.month_views || []) {
+    annotateCostCollections(view.models);
+    annotateCostCollections(view.top_sessions);
+    view.cost_estimate = aggregateCostEstimate(view.models, view.tokens);
+    annotateDailyCosts(view.days, view.cost_estimate, view.tokens);
+  }
+  annotateDailyCosts(report.daily, report.summary.cost_estimate, report.summary.total_tokens);
+  return report;
+}
+
+function annotateCostCollections(items) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    item.cost_estimate = costEstimateForTokens(item.tokens, item.model);
+  }
+}
+
+function aggregateCostEstimate(modelRows, fallbackTokens = 0) {
+  const rows = Array.isArray(modelRows) ? modelRows : [];
+  let low = 0;
+  let high = 0;
+  let midpoint = 0;
+  let pricedTokens = 0;
+  let unpricedTokens = 0;
+  for (const row of rows) {
+    const estimate = row.cost_estimate || costEstimateForTokens(row.tokens, row.model);
+    const tokens = Math.max(0, Math.round(toNumber(row.tokens, 0)));
+    if (!estimate) {
+      unpricedTokens += tokens;
+      continue;
+    }
+    low += estimate.low_usd;
+    high += estimate.high_usd;
+    midpoint += estimate.midpoint_usd;
+    pricedTokens += estimate.priced_tokens;
+  }
+  const fallback = Math.max(0, Math.round(toNumber(fallbackTokens, 0)));
+  if (!pricedTokens && fallback) unpricedTokens = fallback;
+  return formatCostEstimate({
+    low,
+    high,
+    midpoint,
+    pricedTokens,
+    unpricedTokens,
+    model: rows.length === 1 ? rows[0]?.model : "mixed"
+  });
+}
+
+function annotateDailyCosts(days, aggregate, totalTokens) {
+  if (!Array.isArray(days) || !aggregate || !aggregate.priced_tokens) return;
+  const denominator = Math.max(1, Math.round(toNumber(totalTokens, 0)));
+  const lowRate = aggregate.low_usd / denominator;
+  const highRate = aggregate.high_usd / denominator;
+  const midpointRate = aggregate.midpoint_usd / denominator;
+  for (const day of days) {
+    const tokens = Math.max(0, Math.round(toNumber(day.tokens, 0)));
+    day.cost_estimate = formatCostEstimate({
+      low: tokens * lowRate,
+      high: tokens * highRate,
+      midpoint: tokens * midpointRate,
+      pricedTokens: tokens,
+      unpricedTokens: aggregate.unpriced_tokens ? Math.round(tokens * aggregate.unpriced_tokens / denominator) : 0,
+      model: "weighted"
+    });
+  }
+}
+
+function costEstimateForTokens(tokensValue, modelValue) {
+  const tokens = Math.max(0, Math.round(toNumber(tokensValue, 0)));
+  const modelKey = normalizeModelKey(modelValue);
+  const pricing = MODEL_PRICING_USD_PER_MILLION[modelKey];
+  if (!tokens || !pricing) return null;
+  const low = tokens / 1_000_000 * pricing.input;
+  const high = tokens / 1_000_000 * pricing.output;
+  return formatCostEstimate({
+    low,
+    high,
+    midpoint: (low + high) / 2,
+    pricedTokens: tokens,
+    unpricedTokens: 0,
+    model: modelKey,
+    rates: pricing
+  });
+}
+
+function formatCostEstimate(data) {
+  const low = Math.min(data.low || 0, data.high || 0);
+  const high = Math.max(data.low || 0, data.high || 0);
+  const midpoint = data.midpoint ?? ((low + high) / 2);
+  return {
+    model: data.model || "",
+    rates: data.rates || null,
+    low_usd: roundCurrency(low),
+    high_usd: roundCurrency(high),
+    midpoint_usd: roundCurrency(midpoint),
+    range_display: `${formatUsd(low)}-${formatUsd(high)}`,
+    midpoint_display: formatUsd(midpoint),
+    priced_tokens: Math.max(0, Math.round(toNumber(data.pricedTokens, 0))),
+    unpriced_tokens: Math.max(0, Math.round(toNumber(data.unpricedTokens, 0))),
+    basis: "estimated_total_tokens_range"
+  };
+}
+
+function normalizeModelKey(value) {
+  const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-").replace(/\s+/g, "-");
+  if (!raw) return "";
+  if (raw.includes("gpt-5.5")) return "gpt-5.5";
+  if (raw.includes("gpt-5.4-mini")) return "gpt-5.4-mini";
+  if (raw.includes("gpt-5.4-nano")) return "gpt-5.4-nano";
+  if (raw.includes("gpt-5.4")) return "gpt-5.4";
+  if (raw.includes("gpt-5.3-codex")) return "gpt-5.3-codex";
+  if (raw.includes("gpt-5.2-codex")) return "gpt-5.2-codex";
+  if (raw.includes("gpt-5.1-codex-max") || raw.includes("gpt-5.1-codex")) return "gpt-5.1-codex";
+  if (raw.includes("gpt-5-codex")) return "gpt-5-codex";
+  if (raw.includes("gpt-5.2")) return "gpt-5.2";
+  if (raw.includes("gpt-5.1")) return "gpt-5.1";
+  if (raw.includes("gpt-5-mini")) return "gpt-5-mini";
+  if (raw.includes("gpt-5-nano")) return "gpt-5-nano";
+  if (raw === "gpt-5" || raw.startsWith("gpt-5-")) return "gpt-5";
+  return raw;
+}
+
+function roundCurrency(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(number * 10000) / 10000;
+}
+
+function formatUsd(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "$0";
+  if (number >= 1000) return `$${(number / 1000).toFixed(number >= 10000 ? 1 : 2)}K`;
+  if (number >= 10) return `$${number.toFixed(2)}`;
+  if (number >= 1) return `$${number.toFixed(3)}`;
+  if (number > 0) return `$${number.toFixed(4)}`;
+  return "$0";
 }
 
 function computeStats(config, checks, now = new Date()) {
@@ -490,10 +894,12 @@ async function loadCodexAuth(authPath) {
   };
 }
 
-function resolveUserPath(value) {
-  const raw = cleanString(value, DEFAULT_CONFIG.account.authPath, 500);
+function resolveUserPath(value, fallback = DEFAULT_CONFIG.account.authPath) {
+  const raw = cleanString(value, fallback, 500) || cleanString(fallback, "", 500);
   const expandedHome = raw.replace(/^~(?=$|[\\/])/, os.homedir());
-  const expandedEnv = expandedHome.replace(/%([^%]+)%/g, (_, name) => process.env[name] || "");
+  const expandedEnv = expandedHome
+    .replace(/%([^%]+)%/g, (_, name) => process.env[name] || "")
+    .replace(/\$([A-Z_][A-Z0-9_]*)/gi, (_, name) => process.env[name] || "");
   return path.resolve(expandedEnv);
 }
 
@@ -714,7 +1120,12 @@ function clientKey(req) {
 
 function checkRateLimit(req) {
   const now = Date.now();
-  const isRefresh = req.url && (req.url.startsWith("/api/refresh") || req.url.startsWith("/api/probe"));
+  const isRefresh = req.url && (
+    req.url.startsWith("/api/refresh") ||
+    req.url.startsWith("/api/probe") ||
+    req.url.startsWith("/api/codex-usage/refresh") ||
+    req.url.startsWith("/api/codex-usage/report")
+  );
   const max = isRefresh ? REFRESH_RATE_LIMIT_MAX : Number(process.env.GPT_MONITOR_RATE_LIMIT_MAX || RATE_LIMIT_MAX);
   const key = `${clientKey(req)}:${isRefresh ? "refresh" : "global"}`;
   const bucket = rateLimitBuckets.get(key) || { startedAt: now, count: 0 };
@@ -768,9 +1179,56 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+async function serveCodexUsageReport(res) {
+  const reportDir = path.resolve(CODEX_USAGE_OUTPUT_DIR);
+  const reportPath = path.resolve(reportDir, CODEX_USAGE_REPORT_FILE);
+  if (!isInsidePath(reportDir, reportPath)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
+  try {
+    const body = await readFile(reportPath);
+    res.setHeader("Content-Security-Policy", [
+      "default-src 'none'",
+      "script-src 'unsafe-inline'",
+      "style-src 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'none'",
+      "font-src 'self' data:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'"
+    ].join("; "));
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+    res.end(body);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Codex usage report not found");
+  }
+}
+
+function isInsidePath(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/state") {
     return sendJson(res, 200, await getState());
+  }
+  if (req.method === "GET" && url.pathname === "/api/codex-usage") {
+    return sendJson(res, 200, await getCodexUsageState());
+  }
+  if (req.method === "POST" && url.pathname === "/api/codex-usage/refresh") {
+    return sendJson(res, 200, await getCodexUsageState({ force: true }));
+  }
+  if (req.method === "POST" && url.pathname === "/api/codex-usage/report") {
+    return sendJson(res, 200, await generateCodexUsageHtmlReport());
   }
   if (req.method === "GET" && url.pathname === "/api/export") {
     const [config, checks] = await Promise.all([loadConfig(), loadChecks()]);
@@ -816,6 +1274,10 @@ function createServer() {
       const url = new URL(req.url, "http://localhost");
       if (url.pathname.startsWith("/api/")) {
         await handleApi(req, res, url);
+        return;
+      }
+      if (req.method === "GET" && url.pathname === `/${CODEX_USAGE_OUTPUT_DIR.split(path.sep).pop()}/${CODEX_USAGE_REPORT_FILE}`) {
+        await serveCodexUsageReport(res);
         return;
       }
       await serveStatic(req, res, url.pathname);
@@ -884,5 +1346,7 @@ module.exports = {
   normalizeConfig,
   computeStats,
   runProbe,
-  fetchCodexUsage
+  fetchCodexUsage,
+  getCodexUsageState,
+  generateCodexUsageHtmlReport
 };

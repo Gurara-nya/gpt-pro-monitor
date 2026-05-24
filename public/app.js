@@ -31,11 +31,14 @@ const ICONS = {
   "trash-2": '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   "chevron-left": '<path d="m15 18-6-6 6-6"/>',
   "chevron-right": '<path d="m9 18 6-6-6-6"/>',
+  "file-text": '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v6h6"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8A2 2 0 0 1 21 8.8V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>'
 };
 
 let state = null;
+let codexUsageState = null;
+let codexUsageMonth = "";
 let toastTimer = null;
 let historyViewMode = "week";
 let historyCursorDate = new Date();
@@ -48,11 +51,19 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 document.addEventListener("DOMContentLoaded", () => {
   wireEvents();
   refreshState({ quiet: true });
+  refreshCodexUsage({ quiet: true });
   setInterval(() => refreshState({ quiet: true }), 30000);
+  setInterval(() => refreshCodexUsage({ quiet: true }), 5 * 60 * 1000);
 });
 
 function wireEvents() {
   $("#refreshButton").addEventListener("click", () => refreshUsage("manual"));
+  $("#codexUsageRefreshButton").addEventListener("click", () => refreshCodexUsage({ force: true }));
+  $("#codexUsageReportButton").addEventListener("click", generateCodexUsageReport);
+  $("#codexMonthSelect").addEventListener("change", (event) => {
+    codexUsageMonth = event.target.value;
+    renderCodexUsage();
+  });
   $("#settingsButton").addEventListener("click", openSettings);
   $("#closeSettingsButton").addEventListener("click", closeSettings);
   $("#cancelSettingsButton").addEventListener("click", closeSettings);
@@ -109,12 +120,66 @@ async function refreshUsage(reason) {
   }
 }
 
+async function refreshCodexUsage({ quiet = false, force = false } = {}) {
+  const button = $("#codexUsageRefreshButton");
+  if (button) {
+    button.disabled = true;
+    button.classList.add("spinning");
+  }
+  try {
+    codexUsageState = await api(force ? "/api/codex-usage/refresh" : "/api/codex-usage", {
+      method: force ? "POST" : "GET"
+    });
+    renderCodexUsage();
+    if (!quiet) showToast(codexUsageState.message || "Token 数据已同步");
+  } catch (error) {
+    codexUsageState = {
+      status: "error",
+      generatedAt: new Date().toISOString(),
+      message: error.message,
+      report: null
+    };
+    renderCodexUsage();
+    showToast(error.message);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove("spinning");
+    }
+  }
+}
+
+async function generateCodexUsageReport() {
+  const button = $("#codexUsageReportButton");
+  const reportWindow = window.open("about:blank", "_blank");
+  if (reportWindow) {
+    reportWindow.opener = null;
+    reportWindow.document.title = "Codex Token 报告";
+    reportWindow.document.body.textContent = "正在生成报告...";
+  }
+  button.disabled = true;
+  try {
+    const result = await api("/api/codex-usage/report", { method: "POST" });
+    if (result.status !== "ok") throw new Error(result.message || "报告生成失败");
+    await refreshCodexUsage({ quiet: true });
+    if (reportWindow) reportWindow.location.href = result.reportUrl;
+    else window.location.href = result.reportUrl;
+    showToast("Token 报告已生成");
+  } catch (error) {
+    if (reportWindow) reportWindow.close();
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function render() {
   if (!state) return;
   applyTheme();
   renderHeader();
   renderWindowCards();
   renderHistory();
+  renderCodexUsage();
   syncIcons();
 }
 
@@ -154,6 +219,163 @@ function renderWindow(prefix, window) {
   $(`#${prefix}Meter`).style.width = `${safePercent(remaining)}%`;
   $(`#${prefix}Used`).textContent = formatPercent(used);
   $(`#${prefix}Reset`).textContent = window?.resetAfterLabel || formatDateTime(window?.resetAt);
+}
+
+function renderCodexUsage() {
+  const select = $("#codexMonthSelect");
+  const status = codexUsageState?.status || "loading";
+  const report = codexUsageState?.report || null;
+  $("#codexUsageStatus").textContent = codexUsageStatusText(codexUsageState);
+  $(".token-panel").dataset.status = status;
+  $("#codexUsageReportButton").disabled = !state?.config?.codexUsage?.enabled;
+
+  if (!report) {
+    select.innerHTML = `<option>--</option>`;
+    select.disabled = true;
+    setCodexMetricValues("--", "--", "--", "--", "--", "--");
+    $("#codexCostNote").textContent = codexCostNote(report);
+    $("#codexDailyList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
+    $("#codexSourceList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
+    $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
+    $("#codexTopSessions").innerHTML = `<div class="empty-state">${escapeHtml(codexUsageState?.message || "等待 Token 数据")}</div>`;
+    $("#codexSessionCount").textContent = "默认收起";
+    return;
+  }
+
+  const monthViews = Array.isArray(report.month_views) ? report.month_views : [];
+  const selectedView = selectCodexMonthView(report, monthViews);
+  renderCodexMonthSelect(select, monthViews, selectedView?.month || "");
+  const summary = report.summary || {};
+  const today = findTodayUsage(selectedView?.days || []);
+  setCodexMetricValues(
+    summary.cost_estimate?.range_display || "--",
+    selectedView?.cost_estimate?.range_display || "--",
+    today?.cost_estimate?.range_display || "--",
+    summary.total_tokens_display || "--",
+    selectedView?.tokens_display || "--",
+    selectedView ? `${formatInteger(selectedView.threads)} / ${selectedView?.avg_display || "--"}` : "--"
+  );
+  $("#codexCostNote").innerHTML = codexCostNote(report);
+  $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
+  $("#codexSourceList").innerHTML = renderCodexBars(selectedView?.sources || report.sources || [], "source");
+  $("#codexModelList").innerHTML = renderCodexBars(selectedView?.models || report.models || [], "model");
+  const sessions = selectedView?.top_sessions || report.top_sessions || [];
+  $("#codexSessionCount").textContent = `${sessions.length} 个 · 默认收起`;
+  $("#codexTopSessions").innerHTML = renderCodexSessions(sessions);
+}
+
+function codexUsageStatusText(value) {
+  if (!value) return "等待同步";
+  const generated = value.generatedAt ? ` · ${formatDateTime(value.generatedAt)}` : "";
+  const labels = {
+    ok: "已同步",
+    stale: "显示缓存",
+    disabled: "已停用",
+    unavailable: "不可用",
+    error: "异常",
+    loading: "同步中"
+  };
+  return `${labels[value.status] || value.status || "未知"}${generated} · ${value.message || ""}`.replace(/\s+·\s+$/, "");
+}
+
+function selectCodexMonthView(report, monthViews) {
+  if (!monthViews.length) return null;
+  const available = new Set(monthViews.map((item) => item.month));
+  if (!available.has(codexUsageMonth)) {
+    codexUsageMonth = report.default_month && available.has(report.default_month)
+      ? report.default_month
+      : monthViews.at(-1).month;
+  }
+  return monthViews.find((item) => item.month === codexUsageMonth) || monthViews.at(-1);
+}
+
+function renderCodexMonthSelect(select, monthViews, selectedMonth) {
+  select.disabled = monthViews.length === 0;
+  select.innerHTML = monthViews.map((item) => {
+    const label = formatMonthLabel(item.month);
+    const selected = item.month === selectedMonth ? " selected" : "";
+    return `<option value="${escapeAttr(item.month)}"${selected}>${escapeHtml(label)}</option>`;
+  }).join("");
+}
+
+function setCodexMetricValues(totalCost, monthCost, todayCost, totalTokens, monthTokens, threads) {
+  $("#codexTotalCost").textContent = totalCost;
+  $("#codexMonthCost").textContent = monthCost;
+  $("#codexTodayCost").textContent = todayCost;
+  $("#codexTotalTokens").textContent = totalTokens;
+  $("#codexMonthTokens").textContent = monthTokens;
+  $("#codexMonthThreads").textContent = threads;
+}
+
+function codexCostNote(report) {
+  const source = report?.pricing?.source;
+  if (!source) return "费用按 OpenAI 官方输入/输出价格估算。";
+  return `价格源：<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.name)}</a> · ${escapeHtml(source.checkedAt || "")} · ${escapeHtml(source.note)}`;
+}
+
+function findTodayUsage(days) {
+  const key = localDateKey(new Date());
+  return (Array.isArray(days) ? days : []).find((day) => day.day === key) || null;
+}
+
+function renderCodexDaily(days) {
+  const visible = (Array.isArray(days) ? days : [])
+    .filter((day) => Number(day.tokens) > 0)
+    .slice(-14);
+  if (!visible.length) return `<div class="empty-state">本月暂无日消耗数据</div>`;
+  const max = Math.max(...visible.map((day) => Number(day.tokens) || 0), 1);
+  return visible.map((day) => {
+    const width = Math.max(2, Math.round((Number(day.tokens) || 0) / max * 100));
+    return `
+      <div class="token-day">
+        <time datetime="${escapeAttr(day.day)}">${escapeHtml(formatDayLabel(day.day))}</time>
+        <div>
+          <strong>${escapeHtml(day.tokens_display || "--")}</strong>
+          <span>${escapeHtml(day.cost_estimate?.range_display || "--")} · ${escapeHtml(formatInteger(day.threads))} 会话</span>
+          <i><em style="width:${width}%"></em></i>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderCodexBars(items, labelKey) {
+  const visible = (Array.isArray(items) ? items : []).slice(0, 5);
+  if (!visible.length) return `<div class="empty-state">暂无分布数据</div>`;
+  return visible.map((item) => {
+    const label = labelKey === "model"
+      ? [item.model || "unknown", item.provider].filter(Boolean).join(" · ")
+      : item.source || "unknown";
+    const share = Math.max(0, Math.min(100, Number(item.share_pct) || 0));
+    return `
+      <div class="token-bar">
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(item.tokens_display || "--")} · ${escapeHtml(item.cost_estimate?.range_display || "--")} · ${escapeHtml(formatInteger(item.threads))} 会话</span>
+        </div>
+        <b>${escapeHtml(item.share_display || `${Math.round(share)}%`)}</b>
+        <i><em style="width:${share}%"></em></i>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderCodexSessions(sessions) {
+  const visible = (Array.isArray(sessions) ? sessions : []).slice(0, 6);
+  if (!visible.length) return `<div class="empty-state">暂无高消耗会话</div>`;
+  return visible.map((session) => {
+    const title = String(session.title || "未命名会话").trim() || "未命名会话";
+    const model = [session.model || "unknown", session.provider].filter(Boolean).join(" · ");
+    return `
+      <article class="token-session">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")} · ${escapeHtml(session.cost_estimate?.range_display || "--")} · ${escapeHtml(session.created || "--")}</span>
+        </div>
+        <b>${escapeHtml(session.tokens_display || "--")}</b>
+      </article>
+    `;
+  }).join("");
 }
 
 function renderHistory() {
@@ -480,6 +702,7 @@ async function saveSettings(event) {
     });
     closeSettings();
     render();
+    refreshCodexUsage({ quiet: true, force: true });
     showToast("设置已保存");
   } catch (error) {
     showToast(error.message);
@@ -556,6 +779,29 @@ function safePercent(value) {
 function formatPercent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
   return `${Math.round(Number(value))}%`;
+}
+
+function formatInteger(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return new Intl.NumberFormat("zh-CN").format(number);
+}
+
+function formatMonthLabel(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return value || "--";
+  return `${match[1]}年${match[2]}月`;
+}
+
+function formatDayLabel(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return value || "--";
+  return `${match[2]}/${match[3]}`;
+}
+
+function localDateKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
 function formatDateTime(value) {

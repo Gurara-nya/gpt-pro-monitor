@@ -83,6 +83,76 @@
           </article>
         </section>
 
+        <section class="history-panel token-panel" aria-label="Codex Token 消耗">
+          <div class="panel-head token-panel-head">
+            <div class="token-title">
+              <p>Codex Token</p>
+              <h2>消耗仪表盘</h2>
+              <small id="codexUsageStatus">等待同步</small>
+            </div>
+            <div class="token-actions">
+              <select id="codexMonthSelect" aria-label="选择 Token 月份"></select>
+              <button class="icon-button quiet" id="codexUsageRefreshButton" type="button" aria-label="刷新 Token 数据" title="刷新 Token 数据">
+                <i data-lucide="refresh-cw"></i>
+              </button>
+              <button class="text-button" id="codexUsageReportButton" type="button">
+                <i data-lucide="file-text"></i>
+                <span>报告</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="token-metrics">
+            <div class="token-metric">
+              <span>累计费用估算</span>
+              <strong id="codexTotalCost">--</strong>
+            </div>
+            <div class="token-metric">
+              <span>本月费用估算</span>
+              <strong id="codexMonthCost">--</strong>
+            </div>
+            <div class="token-metric">
+              <span>今日费用估算</span>
+              <strong id="codexTodayCost">--</strong>
+            </div>
+            <div class="token-metric">
+              <span>累计 Token</span>
+              <strong id="codexTotalTokens">--</strong>
+            </div>
+            <div class="token-metric">
+              <span>本月 Token</span>
+              <strong id="codexMonthTokens">--</strong>
+            </div>
+            <div class="token-metric">
+              <span>本月会话 / 均值</span>
+              <strong id="codexMonthThreads">--</strong>
+            </div>
+          </div>
+          <p class="token-cost-note" id="codexCostNote">费用按 OpenAI 官方输入/输出价格估算。</p>
+
+          <div class="token-breakdowns">
+            <section class="token-daily" aria-label="日消耗">
+              <h3>日消耗</h3>
+              <div class="token-daily-list" id="codexDailyList"></div>
+            </section>
+            <section aria-label="主要入口">
+              <h3>主要入口</h3>
+              <div class="token-bars" id="codexSourceList"></div>
+            </section>
+            <section aria-label="模型分布">
+              <h3>模型分布</h3>
+              <div class="token-bars" id="codexModelList"></div>
+            </section>
+            <details class="token-sessions" aria-label="高消耗会话">
+              <summary>
+                <span>高消耗会话</span>
+                <b id="codexSessionCount">默认收起</b>
+              </summary>
+              <div id="codexTopSessions"></div>
+            </details>
+          </div>
+        </section>
+
         <section class="history-panel" aria-label="同步历史">
           <div class="panel-head">
             <div class="history-heading">
@@ -165,6 +235,28 @@
               <label class="check-row">
                 <input name="schedule.enabled" type="checkbox" />
                 <span>自动同步</span>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h3>Codex Token</h3>
+            <div class="form-grid">
+              <label class="wide">
+                <span>SQLite 数据库</span>
+                <input name="codexUsage.dbPath" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>Skill 路径</span>
+                <input name="codexUsage.skillPath" autocomplete="off" />
+              </label>
+              <label>
+                <span>高消耗会话数</span>
+                <input name="codexUsage.topSessions" type="number" min="1" max="50" />
+              </label>
+              <label class="check-row">
+                <input name="codexUsage.enabled" type="checkbox" />
+                <span>启用 Token 面板</span>
               </label>
             </div>
           </section>
