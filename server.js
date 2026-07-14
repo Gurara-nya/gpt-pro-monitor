@@ -9,6 +9,15 @@ const { mkdir, readFile, readdir, rename, writeFile } = require("node:fs/promise
 const { promisify } = require("node:util");
 const { querySessions } = require("./lib/session-query");
 const { usageWindows, withUsageWindows } = require("./lib/quota-windows");
+const { readRolloutTelemetry } = require("./lib/codex-telemetry");
+const {
+  OFFICIAL_PRICING_USD_PER_MILLION,
+  PRICE_CATALOG_VERSION,
+  estimateSplitCost,
+  estimateTotalTokenRange,
+  normalizeModelKey: normalizePricingModelKey,
+  normalizePricingOverrides
+} = require("./lib/codex-pricing");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
@@ -28,6 +37,7 @@ const CODEX_USAGE_STARTUP_REFRESH_DELAY_MS = 30 * 1000;
 const SUB2API_CACHE_HISTORY_MAX_DAYS = 730;
 const DEFAULT_USAGE_USER_ID = "gurara";
 const CODEX_USAGE_SCRIPT = path.join(ROOT, "scripts", "codex-usage", "scripts", "generate_codex_usage_report.py");
+const CODEX_USAGE_HTML_TEMPLATE = path.join(ROOT, "scripts", "codex-usage", "assets", "report-template.html");
 const CODEX_USAGE_REPORT_FILE = "latest.html";
 const CODEX_USAGE_JSON_FILE = "latest.json";
 const CODEX_USAGE_MD_FILE = "latest.md";
@@ -45,10 +55,10 @@ const ALLOWED_USAGE_ENDPOINTS = [
 ];
 const OPENAI_PRICE_SOURCE = {
   name: "OpenAI API Pricing",
-  url: "https://openai.com/api/pricing/",
-  checkedAt: "2026-05-24",
+  url: "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+  checkedAt: PRICE_CATALOG_VERSION,
   unit: "USD / 1M tokens",
-  note: "优先使用本地 rollout JSONL 的 token_count 输入/缓存输入/输出拆分；缺失时回退为总 token 区间估算，未计入 Batch、Regional、长上下文或工具费用差异。"
+  note: "API 等价成本估算，不是 ChatGPT 套餐账单。已按输入、缓存输入、输出及 GPT-5.6 长上下文倍率计价；无法识别缓存写入、工具费或其他特殊计费。"
 };
 const CODEX_SOURCE_LABELS = {
   vscode: "Codex 桌面端",
@@ -60,7 +70,8 @@ const DEFAULT_CODEX_USAGE = {
   dbPath: "~/.codex/state_5.sqlite",
   uploadedFileName: "",
   uploadedAt: null,
-  topSessions: 10
+  topSessions: 10,
+  pricingOverrides: []
 };
 const DEFAULT_SUB2API = {
   enabled: false,
@@ -87,21 +98,7 @@ const DEFAULT_USAGE_USER = {
     startDate: "2026-04-14"
   }
 };
-const MODEL_PRICING_USD_PER_MILLION = {
-  "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 },
-  "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15 },
-  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
-  "gpt-5.4-nano": { input: 0.2, cachedInput: 0.02, output: 1.25 },
-  "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
-  "gpt-5.2-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
-  "gpt-5.1-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
-  "gpt-5-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
-  "gpt-5.2": { input: 1.75, cachedInput: 0.175, output: 14 },
-  "gpt-5.1": { input: 1.25, cachedInput: 0.125, output: 10 },
-  "gpt-5": { input: 1.25, cachedInput: 0.125, output: 10 },
-  "gpt-5-mini": { input: 0.25, cachedInput: 0.025, output: 2 },
-  "gpt-5-nano": { input: 0.05, cachedInput: 0.005, output: 0.4 }
-};
+const MODEL_PRICING_USD_PER_MILLION = OFFICIAL_PRICING_USD_PER_MILLION;
 const SECURITY_HEADERS = {
   "Content-Security-Policy": [
     "default-src 'self'",
@@ -361,7 +358,8 @@ function normalizeCodexUsageConfig(input) {
     dbPath: cleanString(source.dbPath, DEFAULT_CODEX_USAGE.dbPath, 500),
     uploadedFileName: cleanString(source.uploadedFileName, "", 240),
     uploadedAt: validIsoOrNull(source.uploadedAt),
-    topSessions: clamp(Math.round(toNumber(source.topSessions, DEFAULT_CODEX_USAGE.topSessions)), 1, 50)
+    topSessions: clamp(Math.round(toNumber(source.topSessions, DEFAULT_CODEX_USAGE.topSessions)), 1, 50),
+    pricingOverrides: normalizePricingOverrides(source.pricingOverrides)
   };
 }
 
@@ -694,13 +692,14 @@ function codexUsageConfigKey(user) {
   const apiKeyPath = sub2api.apiKeyPath ? resolveUserPath(sub2api.apiKeyPath, "") : "";
   const adminPasswordPath = sub2api.adminPasswordPath ? resolveUserPath(sub2api.adminPasswordPath, "") : "";
   return JSON.stringify({
-    reportSchema: "usage-users-v1",
+    reportSchema: "event-telemetry-v2",
     userId: user.id,
     codexUsage: {
       enabled: usageConfig.enabled !== false,
       dbPath,
       dbFile: fileSignature(dbPath),
-      topSessions: usageConfig.topSessions
+      topSessions: usageConfig.topSessions,
+      pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides)
     },
     sub2api: {
       enabled: sub2api.enabled === true,
@@ -758,7 +757,7 @@ async function buildCodexUsageState(user) {
     if (!report || typeof report !== "object" || !report.summary) {
       throw Object.assign(new Error("Codex Token 报告 JSON 结构不完整"), { codexUsageStatus: "error" });
     }
-    usageDetails = await loadCodexTokenUsageDetails(usageConfig);
+    usageDetails = reconcileCodexUsageDetails(report, await loadCodexTokenUsageDetails(usageConfig));
   } else {
     report = createEmptyCodexUsageReport(user, paths.dbPath, usageConfig.enabled === false ? "disabled" : "missing_db");
   }
@@ -772,6 +771,22 @@ async function buildCodexUsageState(user) {
     message: "Codex Token 数据已同步",
     report
   };
+}
+
+async function writeCodexUsageHtmlFromReport(report, htmlPath) {
+  const template = await readFile(CODEX_USAGE_HTML_TEMPLATE, "utf8");
+  const reportJson = JSON.stringify(report).replace(/<\//g, "<\\/");
+  const title = String(report?.meta?.title || "Codex Token 使用报告")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+  await writeFile(
+    htmlPath,
+    template.replaceAll("__REPORT_TITLE__", title).replaceAll("__REPORT_JSON__", reportJson),
+    "utf8"
+  );
 }
 
 async function generateCodexUsageHtmlReport({ userId = null } = {}) {
@@ -805,11 +820,12 @@ async function generateCodexUsageHtmlReport({ userId = null } = {}) {
   });
 
   const report = JSON.parse(await readFile(jsonPath, "utf8"));
-  const usageDetails = await loadCodexTokenUsageDetails(usageConfig);
+  const usageDetails = reconcileCodexUsageDetails(report, await loadCodexTokenUsageDetails(usageConfig));
   enrichCodexUsageCosts(report, usageDetails);
   enrichReportWithCodexSessions(report, usageDetails);
   await enrichReportWithSub2Api(report, user.sub2api);
   await writeJson(jsonPath, report);
+  await writeCodexUsageHtmlFromReport(report, htmlPath);
   const result = attachUsageUser({
     status: "ok",
     generatedAt: new Date().toISOString(),
@@ -866,7 +882,8 @@ function publicUsageUser(user) {
       dbPath: user.codexUsage?.dbPath || "",
       uploadedFileName: user.codexUsage?.uploadedFileName || "",
       uploadedAt: user.codexUsage?.uploadedAt || null,
-      topSessions: user.codexUsage?.topSessions || DEFAULT_CODEX_USAGE.topSessions
+      topSessions: user.codexUsage?.topSessions || DEFAULT_CODEX_USAGE.topSessions,
+      pricingOverrides: normalizePricingOverrides(user.codexUsage?.pricingOverrides)
     },
     sub2api: {
       enabled: user.sub2api?.enabled === true,
@@ -1036,9 +1053,7 @@ async function loadCodexTokenUsageDetails(usageConfig) {
     const record = await readCodexSessionUsage(filePath);
     if (!record?.threadId || !record.usageSplit?.total_tokens) continue;
     const previous = byThreadId.get(record.threadId);
-    if (!previous || String(record.lastEventAt || "") >= String(previous.lastEventAt || "")) {
-      byThreadId.set(record.threadId, record);
-    }
+    byThreadId.set(record.threadId, previous ? mergeCodexTelemetryRecords(previous, record) : record);
   }
 
   const records = [...byThreadId.values()];
@@ -1053,6 +1068,7 @@ async function loadCodexTokenUsageDetails(usageConfig) {
     records,
     byThreadId,
     ...indexes,
+    pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides),
     coverage: {
       source: "rollout_jsonl_token_count",
       session_files: files.length,
@@ -1063,6 +1079,243 @@ async function loadCodexTokenUsageDetails(usageConfig) {
       output_tokens: indexes.total.usageSplit.output_tokens,
       reasoning_output_tokens: indexes.total.usageSplit.reasoning_output_tokens
     }
+  };
+}
+
+function reconcileCodexUsageDetails(report, usageDetails) {
+  if (!usageDetails) return null;
+  const sqliteSessions = Array.isArray(report?.sessions) ? report.sessions : [];
+  const exactByThreadId = usageDetails.byThreadId || new Map();
+  const reconciledByThreadId = new Map();
+  const distributionRecords = [];
+  const seen = new Set();
+
+  for (const session of sqliteSessions) {
+    const threadId = String(session?.id || "").trim();
+    if (!threadId) continue;
+    seen.add(threadId);
+    const exact = exactByThreadId.get(threadId);
+    const sqliteTokens = nonnegativeInteger(session.tokens);
+    const rawEvents = Array.isArray(exact?.events) ? exact.events : [];
+    const events = capTelemetryEvents(rawEvents, sqliteTokens).map((event) => ({
+      ...event,
+      threadId,
+      sourceLabel: event.sourceLabel || cleanString(exact?.sourceLabel || session.source, "未知来源", 120),
+      model: event.model || cleanString(session.model || exact?.model, "unknown", 120),
+      modelKey: event.modelKey || normalizeModelKey(event.model || session.model || exact?.model),
+      provider: event.provider || cleanString(session.provider || exact?.provider, "", 80),
+      pricingOverrides: usageDetails.pricingOverrides
+    }));
+    const exactUsageSplit = createUsageGroup().usageSplit;
+    for (const event of events) addUsageSplit(exactUsageSplit, event.usageSplit);
+    const exactTokens = nonnegativeInteger(exactUsageSplit.total_tokens);
+    const estimatedTokens = Math.max(0, sqliteTokens - exactTokens);
+    const createdAt = safeIsoString(session.created) || session.created || exact?.createdAt || "";
+    const createdParts = localDatePartsFromTimestamp(createdAt) || { day: String(session.created || "").slice(0, 10) };
+    const source = cleanString(exact?.sourceLabel || session.source, "未知来源", 120);
+    const model = cleanString(session.model || exact?.model, "unknown", 120);
+    const provider = cleanString(session.provider || exact?.provider, "", 80);
+    const costRecords = [...events];
+    if (estimatedTokens) {
+      const day = createdParts?.day || String(session.created || "").slice(0, 10);
+      costRecords.push({
+        threadId,
+        at: createdAt,
+        day,
+        month: day ? day.slice(0, 7) : "",
+        sourceLabel: source,
+        model,
+        modelKey: normalizeModelKey(model),
+        provider,
+        tokens: estimatedTokens,
+        estimated: true,
+        usageSplit: {
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_output_tokens: 0,
+          total_tokens: estimatedTokens
+        },
+        pricingOverrides: usageDetails.pricingOverrides
+      });
+    }
+    distributionRecords.push(...costRecords);
+    reconciledByThreadId.set(threadId, {
+      ...(exact || {}),
+      threadId,
+      title: exact?.title || session.title,
+      cwd: exact?.cwd || session.cwd,
+      source,
+      sourceLabel: source,
+      model,
+      modelKey: normalizeModelKey(model),
+      provider,
+      createdAt,
+      updatedAt: safeIsoString(session.updated) || session.updated || exact?.updatedAt || "",
+      day: createdParts?.day || "",
+      month: createdParts?.day ? createdParts.day.slice(0, 7) : "",
+      sqliteTokens,
+      exactTokens,
+      estimatedTokens,
+      tokens: sqliteTokens,
+      usageSplit: exactUsageSplit,
+      rawExactTokens: nonnegativeInteger(exact?.usageSplit?.total_tokens),
+      events,
+      costRecords,
+      pricingOverrides: usageDetails.pricingOverrides
+    });
+  }
+
+  const indexes = buildCodexUsageIndexes(distributionRecords);
+  const exactRecords = distributionRecords.filter((record) => !record.estimated);
+  const exactUsage = createUsageGroup().usageSplit;
+  for (const record of exactRecords) addUsageSplit(exactUsage, record.usageSplit);
+  const coverage = {
+    ...usageDetails.coverage,
+    split_threads: new Set(exactRecords.map((record) => record.threadId)).size,
+    split_tokens: exactUsage.total_tokens,
+    input_tokens: exactUsage.input_tokens,
+    cached_input_tokens: exactUsage.cached_input_tokens,
+    output_tokens: exactUsage.output_tokens,
+    reasoning_output_tokens: exactUsage.reasoning_output_tokens,
+    sqlite_control_adjustment_tokens: [...reconciledByThreadId.values()]
+      .reduce((sum, record) => sum + Math.max(0, nonnegativeInteger(record.rawExactTokens) - nonnegativeInteger(record.exactTokens)), 0)
+  };
+  const reconciled = {
+    ...usageDetails,
+    coverage,
+    records: [...reconciledByThreadId.values()],
+    byThreadId: reconciledByThreadId,
+    exactIndexes: {
+      total: usageDetails.total,
+      byMonth: usageDetails.byMonth,
+      byDay: usageDetails.byDay,
+      byModel: usageDetails.byModel,
+      bySource: usageDetails.bySource
+    },
+    ...indexes
+  };
+  applyCanonicalTokenDistributions(report, reconciled);
+  return reconciled;
+}
+
+function capTelemetryEvents(events, tokenLimit) {
+  let remaining = nonnegativeInteger(tokenLimit);
+  const capped = [];
+  for (const event of events || []) {
+    if (!remaining) break;
+    const usage = normalizeTokenUsage(event.usageSplit);
+    if (!usage) continue;
+    if (usage.total_tokens <= remaining) {
+      capped.push(event);
+      remaining -= usage.total_tokens;
+      continue;
+    }
+    const ratio = remaining / usage.total_tokens;
+    let inputTokens = Math.min(remaining, Math.round(usage.input_tokens * ratio));
+    let outputTokens = Math.max(0, remaining - inputTokens);
+    if (!usage.input_tokens && usage.output_tokens) {
+      inputTokens = 0;
+      outputTokens = remaining;
+    }
+    capped.push({
+      ...event,
+      controlCapped: true,
+      usageSplit: {
+        input_tokens: inputTokens,
+        cached_input_tokens: Math.min(inputTokens, Math.round(usage.cached_input_tokens * ratio)),
+        output_tokens: outputTokens,
+        reasoning_output_tokens: Math.min(outputTokens, Math.round(usage.reasoning_output_tokens * ratio)),
+        total_tokens: remaining
+      }
+    });
+    remaining = 0;
+  }
+  return capped;
+}
+
+function groupThreadCount(group) {
+  return new Set((group?.records || []).map((record) => record.threadId).filter(Boolean)).size;
+}
+
+function setReportTokenRow(row, tokens, totalTokens) {
+  const value = nonnegativeInteger(tokens);
+  row.tokens = value;
+  row.tokens_display = formatCompactTokensForReport(value);
+  row.tokens_full = formatIntegerForReport(value);
+  row.share_pct = totalTokens ? Math.round(value / totalTokens * 10000) / 100 : 0;
+  row.share_display = `${row.share_pct.toFixed(2)}%`;
+  return row;
+}
+
+function syncReportRows(rows, index, keyField, keyNormalizer, totalTokens) {
+  const existing = new Map((rows || []).map((row) => [keyNormalizer(row[keyField]), row]));
+  const synced = [];
+  for (const [key, group] of index || []) {
+    const normalizedKey = keyNormalizer(key);
+    const row = existing.get(normalizedKey) || { [keyField]: key };
+    row.threads = groupThreadCount(group);
+    setReportTokenRow(row, group.usageSplit.total_tokens, totalTokens);
+    synced.push(row);
+  }
+  return synced.sort((left, right) => nonnegativeInteger(right.tokens) - nonnegativeInteger(left.tokens));
+}
+
+function applyCanonicalTokenDistributions(report, usageDetails) {
+  if (!report?.summary || !usageDetails?.total) return;
+  const totalTokens = nonnegativeInteger(report.summary.total_tokens);
+  report.models = syncReportRows(report.models, usageDetails.byModel, "model", normalizeModelKey, totalTokens);
+  report.sources = syncReportRows(report.sources, usageDetails.bySource, "source", (value) => String(value || ""), totalTokens);
+  report.daily = syncReportRows(report.daily, usageDetails.byDay, "day", (value) => String(value || ""), totalTokens)
+    .sort((left, right) => String(left.day).localeCompare(String(right.day)));
+  report.daily_top = report.daily.slice().sort((left, right) => right.tokens - left.tokens).slice(0, 10);
+  report.monthly = syncReportRows(report.monthly, usageDetails.byMonth, "month", (value) => String(value || ""), totalTokens)
+    .sort((left, right) => String(left.month).localeCompare(String(right.month)));
+
+  const views = new Map((report.month_views || []).map((view) => [view.month, view]));
+  report.month_views = report.monthly.map((monthRow) => {
+    const month = monthRow.month;
+    const group = usageDetails.byMonth.get(month);
+    const view = views.get(month) || { month, top_sessions: [] };
+    Object.assign(view, monthRow);
+    const byDay = groupIndex(group, "day");
+    const byModel = groupIndex(group, "model");
+    const bySource = groupIndex(group, "source");
+    view.days = syncReportRows(view.days, byDay, "day", (value) => String(value || ""), monthRow.tokens)
+      .sort((left, right) => String(left.day).localeCompare(String(right.day)));
+    view.models = syncReportRows(view.models, byModel, "model", normalizeModelKey, monthRow.tokens);
+    view.sources = syncReportRows(view.sources, bySource, "source", (value) => String(value || ""), monthRow.tokens);
+    view.top_day = view.days.slice().sort((left, right) => right.tokens - left.tokens)[0] || null;
+    return view;
+  });
+  report.default_month = report.month_views.some((view) => view.month === report.default_month)
+    ? report.default_month
+    : report.month_views.at(-1)?.month || "";
+}
+
+function mergeCodexTelemetryRecords(left, right) {
+  const byEventId = new Map();
+  for (const event of [...(left.events || []), ...(right.events || [])]) {
+    if (event?.eventId && !byEventId.has(event.eventId)) byEventId.set(event.eventId, event);
+  }
+  const events = [...byEventId.values()].sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
+  const usageSplit = createUsageGroup().usageSplit;
+  for (const event of events) addUsageSplit(usageSplit, event.usageSplit);
+  const latest = String(right.lastEventAt || "") >= String(left.lastEventAt || "") ? right : left;
+  const earliest = String(left.createdAt || "") <= String(right.createdAt || "") ? left : right;
+  return {
+    ...earliest,
+    ...latest,
+    filePath: latest.filePath,
+    createdAt: earliest.createdAt || latest.createdAt,
+    day: earliest.day || latest.day,
+    month: earliest.month || latest.month,
+    usageSplit,
+    tokens: usageSplit.total_tokens,
+    tokenCountEvents: nonnegativeInteger(left.tokenCountEvents) + nonnegativeInteger(right.tokenCountEvents),
+    duplicateEvents: nonnegativeInteger(left.duplicateEvents) + nonnegativeInteger(right.duplicateEvents),
+    grewDuringRead: Boolean(left.grewDuringRead || right.grewDuringRead),
+    events
   };
 }
 
@@ -1115,90 +1368,18 @@ async function listJsonlFiles(rootDir) {
 }
 
 async function readCodexSessionUsage(filePath) {
-  let text;
-  try {
-    text = await readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-
-  let threadId = threadIdFromRolloutPath(filePath);
-  let source = "";
-  let model = "";
-  let provider = "";
-  let created = rolloutDateFromPath(filePath);
-  let createdAt = created?.localDateTime || "";
-  let updatedAt = "";
-  let cwd = "";
-  let finalUsage = null;
-  let lastEventAt = "";
-  let tokenCountEvents = 0;
-
-  for (const line of text.split(/\r?\n/)) {
-    if (
-      !line.includes("token_count") &&
-      !line.includes("session_meta") &&
-      !line.includes("turn_context")
-    ) {
-      continue;
-    }
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const payload = event && typeof event === "object" ? event.payload : null;
-    if (!payload || typeof payload !== "object") continue;
-
-    if (event.type === "session_meta") {
-      if (payload.id) threadId = String(payload.id);
-      if (payload.source) source = String(payload.source);
-      if (payload.model_provider) provider = String(payload.model_provider);
-      if (payload.cwd) cwd = String(payload.cwd);
-      if (payload.timestamp) {
-        createdAt ||= String(payload.timestamp);
-        updatedAt = String(payload.timestamp);
-        if (!created) created = localDatePartsFromTimestamp(payload.timestamp);
-      }
-      continue;
-    }
-
-    if (event.type === "turn_context") {
-      if (payload.model) model = String(payload.model);
-      if (payload.cwd && !cwd) cwd = String(payload.cwd);
-      continue;
-    }
-
-    if (payload.type === "token_count") {
-      const usage = extractTokenUsage(payload);
-      if (!usage) continue;
-      finalUsage = usage;
-      lastEventAt = String(event.timestamp || lastEventAt || "");
-      updatedAt = lastEventAt || updatedAt;
-      tokenCountEvents += 1;
-    }
-  }
-
-  if (!threadId || !finalUsage) return null;
-  const day = created?.day || "";
+  const telemetry = await readRolloutTelemetry(filePath);
+  if (!telemetry) return null;
+  const events = telemetry.events.map((event) => ({
+    ...event,
+    sourceLabel: sourceLabel(event.source),
+    modelKey: normalizeModelKey(event.model)
+  }));
   return {
-    threadId,
-    filePath,
-    day,
-    month: day ? day.slice(0, 7) : "",
-    source,
-    sourceLabel: sourceLabel(source),
-    model,
-    modelKey: normalizeModelKey(model),
-    provider,
-    cwd,
-    createdAt: validIsoOrNull(createdAt) || createdAt,
-    updatedAt: validIsoOrNull(updatedAt) || updatedAt,
-    usageSplit: finalUsage,
-    tokens: finalUsage.total_tokens,
-    lastEventAt,
-    tokenCountEvents
+    ...telemetry,
+    sourceLabel: sourceLabel(telemetry.source),
+    modelKey: normalizeModelKey(telemetry.model),
+    events
   };
 }
 
@@ -1233,11 +1414,25 @@ function buildCodexUsageIndexes(records) {
     bySource: new Map()
   };
   for (const record of records) {
-    addRecordToGroup(indexes.total, record);
-    addRecordToIndex(indexes.byMonth, record.month, record);
-    addRecordToIndex(indexes.byDay, record.day, record);
-    addRecordToIndex(indexes.byModel, record.modelKey || normalizeModelKey(record.model), record);
-    addRecordToIndex(indexes.bySource, record.sourceLabel || sourceLabel(record.source), record);
+    const telemetryEvents = Array.isArray(record.events) && record.events.length ? record.events : [record];
+    for (const event of telemetryEvents) {
+      const indexed = {
+        ...event,
+        threadId: event.threadId || record.threadId,
+        source: event.source || record.source,
+        sourceLabel: event.sourceLabel || record.sourceLabel || sourceLabel(event.source || record.source),
+        model: event.model || record.model,
+        modelKey: event.modelKey || normalizeModelKey(event.model || record.model),
+        provider: event.provider || record.provider,
+        day: event.day || record.day,
+        month: event.month || record.month
+      };
+      addRecordToGroup(indexes.total, indexed);
+      addRecordToIndex(indexes.byMonth, indexed.month, indexed);
+      addRecordToIndex(indexes.byDay, indexed.day, indexed);
+      addRecordToIndex(indexes.byModel, indexed.modelKey, indexed);
+      addRecordToIndex(indexes.bySource, indexed.sourceLabel, indexed);
+    }
   }
   return indexes;
 }
@@ -1315,7 +1510,7 @@ function nonnegativeInteger(value) {
 function enrichCodexUsageCosts(report, usageDetails = null) {
   if (!report || typeof report !== "object") return report;
   const splitCoverage = codexUsageSplitCoverage(usageDetails, report.summary?.total_tokens);
-  const effectiveUsageDetails = splitCoverage?.full_coverage ? usageDetails : null;
+  const effectiveUsageDetails = usageDetails;
   report.pricing = {
     source: OPENAI_PRICE_SOURCE,
     models: MODEL_PRICING_USD_PER_MILLION,
@@ -1357,10 +1552,12 @@ function buildCodexSessionList(records, report) {
   return records.map((record) => {
     const id = String(record.threadId || "").trim();
     const top = topById.get(id) || {};
-    const usageSplit = usageSplitPayload(record.usageSplit);
+    const usageSplit = usageSplitPayload({
+      ...record.usageSplit,
+      total_tokens: record.sqliteTokens || record.tokens || record.usageSplit?.total_tokens
+    });
     const model = String(record.model || top.model || "unknown");
-    const costEstimate = costEstimateForUsageSplit(usageSplit, model) ||
-      costEstimateForTokens(record.tokens, model);
+    const costEstimate = aggregateSplitCost(record.costRecords || [record]);
     const title = cleanString(record.title || top.title, "未命名会话", 240) || "未命名会话";
     const cwd = cleanString(record.cwd || top.cwd, "", 500);
     const source = cleanString(record.sourceLabel || top.source || sourceLabel(record.source), "未知来源", 120);
@@ -1387,6 +1584,8 @@ function buildCodexSessionList(records, report) {
       tokens_full: formatIntegerForReport(record.tokens),
       usage_split: usageSplit,
       cost_estimate: costEstimate,
+      exact_tokens: nonnegativeInteger(record.exactTokens ?? record.usageSplit?.total_tokens),
+      unparsed_tokens: nonnegativeInteger(record.estimatedTokens),
       token_count_events: nonnegativeInteger(record.tokenCountEvents)
     };
   }).sort((left, right) => {
@@ -2241,11 +2440,27 @@ function codexUsageSplitCoverage(usageDetails, reportTokens) {
   const splitTotal = nonnegativeInteger(usageDetails.coverage.split_tokens);
   const tokenDelta = Math.abs(splitTotal - reportTotal);
   const tolerance = Math.max(1000, Math.round(reportTotal * 0.002));
+  let pricedTokens = 0;
+  for (const record of usageDetails.total?.records || []) {
+    const estimate = record.estimated
+      ? costEstimateForTokens(record.tokens || record.usageSplit?.total_tokens, record.model, record.pricingOverrides, record.at)
+      : costEstimateForUsageSplit(record.usageSplit, record.model, record.pricingOverrides, record.at);
+    pricedTokens += nonnegativeInteger(estimate?.priced_tokens);
+  }
+  pricedTokens = Math.min(reportTotal || pricedTokens, pricedTokens);
+  const unparsedTokens = Math.max(0, reportTotal - splitTotal);
+  const unpricedTokens = Math.max(0, reportTotal - pricedTokens);
   return {
     ...usageDetails.coverage,
     report_tokens: reportTotal,
     token_delta: tokenDelta,
-    full_coverage: splitTotal > 0 && (!reportTotal || tokenDelta <= tolerance)
+    full_coverage: splitTotal > 0 && (!reportTotal || tokenDelta <= tolerance),
+    split_coverage_percent: reportTotal ? Math.round(splitTotal / reportTotal * 10000) / 100 : 0,
+    priced_tokens: pricedTokens,
+    priced_coverage_percent: reportTotal ? Math.round(pricedTokens / reportTotal * 10000) / 100 : 0,
+    unparsed_tokens: unparsedTokens,
+    unpriced_tokens: unpricedTokens,
+    active_file_races: usageDetails.records.filter((record) => record.grewDuringRead).length
   };
 }
 
@@ -2265,10 +2480,15 @@ function annotateSessionCosts(items, usageDetails) {
   for (const item of items) {
     const record = item?.id ? usageDetails?.byThreadId?.get(item.id) : null;
     if (record) {
-      item.usage_split = usageSplitPayload(record.usageSplit);
-      item.cost_estimate = costEstimateForUsageSplit(record.usageSplit, item.model || record.model);
+      item.usage_split = usageSplitPayload({
+        ...record.usageSplit,
+        total_tokens: record.sqliteTokens || item.tokens || record.usageSplit?.total_tokens
+      });
+      item.cost_estimate = aggregateSplitCost(record.costRecords || [record]);
+      item.exact_tokens = nonnegativeInteger(record.exactTokens ?? record.usageSplit?.total_tokens);
+      item.unparsed_tokens = nonnegativeInteger(record.estimatedTokens);
     } else {
-      item.cost_estimate = costEstimateForTokens(item.tokens, item.model);
+      item.cost_estimate = costEstimateForTokens(item.tokens, item.model, usageDetails?.pricingOverrides);
     }
   }
 }
@@ -2289,7 +2509,11 @@ function groupIndex(parentGroup, keyType) {
   for (const record of parentGroup.records) {
     const key = keyType === "model"
       ? record.modelKey || normalizeModelKey(record.model)
-      : record.sourceLabel || sourceLabel(record.source);
+      : keyType === "day"
+        ? record.day
+        : keyType === "month"
+          ? record.month
+          : record.sourceLabel || sourceLabel(record.source);
     addRecordToIndex(index, key, record);
   }
   return index;
@@ -2356,9 +2580,12 @@ function annotateDailyCosts(days, usageDetails, aggregate, totalTokens) {
 
 function aggregateSplitCost(records) {
   const rows = Array.isArray(records) ? records : [];
-  let total = 0;
+  let low = 0;
+  let high = 0;
+  let midpoint = 0;
   let pricedTokens = 0;
   let unpricedTokens = 0;
+  let estimatedTokens = 0;
   const usageSplit = createUsageGroup().usageSplit;
   const components = {
     input_usd: 0,
@@ -2367,78 +2594,60 @@ function aggregateSplitCost(records) {
   };
   for (const record of rows) {
     addUsageSplit(usageSplit, record.usageSplit);
-    const estimate = costEstimateForUsageSplit(record.usageSplit, record.model);
+    const estimate = record.estimated
+      ? costEstimateForTokens(
+        record.tokens || record.usageSplit?.total_tokens,
+        record.model,
+        record.pricingOverrides,
+        record.at
+      )
+      : costEstimateForUsageSplit(record.usageSplit, record.model, record.pricingOverrides, record.at);
+    if (record.estimated) estimatedTokens += nonnegativeInteger(record.tokens || record.usageSplit?.total_tokens);
     if (!estimate) {
       unpricedTokens += nonnegativeInteger(record.usageSplit?.total_tokens);
       continue;
     }
-    total += estimate.midpoint_usd;
+    low += estimate.low_usd;
+    high += estimate.high_usd;
+    midpoint += estimate.midpoint_usd;
     pricedTokens += estimate.priced_tokens;
     components.input_usd += estimate.components?.input_usd || 0;
     components.cached_input_usd += estimate.components?.cached_input_usd || 0;
     components.output_usd += estimate.components?.output_usd || 0;
   }
   return formatCostEstimate({
-    low: total,
-    high: total,
-    midpoint: total,
+    low,
+    high,
+    midpoint,
     pricedTokens,
     unpricedTokens,
     model: rows.length === 1 ? rows[0]?.model : "mixed",
     usageSplit,
     components,
-    exact: unpricedTokens === 0,
-    basis: "split_token_usage"
+    exact: unpricedTokens === 0 && estimatedTokens === 0,
+    estimatedTokens,
+    basis: estimatedTokens ? "mixed_exact_and_estimated" : "split_token_usage"
   });
 }
 
-function costEstimateForUsageSplit(usageSplit, modelValue) {
+function costEstimateForUsageSplit(usageSplit, modelValue, pricingOverrides = [], at = null) {
   const usage = normalizeTokenUsage(usageSplit);
-  const modelKey = normalizeModelKey(modelValue);
-  const pricing = MODEL_PRICING_USD_PER_MILLION[modelKey];
-  if (!usage?.total_tokens || !pricing) return null;
-  const cachedInput = Math.min(usage.cached_input_tokens, usage.input_tokens);
-  const uncachedInput = Math.max(0, usage.input_tokens - cachedInput);
-  const inputCost = uncachedInput / 1_000_000 * pricing.input;
-  const cachedInputCost = cachedInput / 1_000_000 * (pricing.cachedInput ?? pricing.input);
-  const outputCost = usage.output_tokens / 1_000_000 * pricing.output;
-  const total = inputCost + cachedInputCost + outputCost;
+  const estimate = estimateSplitCost(usage, modelValue, { overrides: pricingOverrides, at });
+  if (!estimate) return null;
   return formatCostEstimate({
-    low: total,
-    high: total,
-    midpoint: total,
-    pricedTokens: usage.total_tokens,
-    unpricedTokens: 0,
-    model: modelKey,
-    rates: pricing,
+    ...estimate,
     usageSplit: usage,
     components: {
-      input_usd: roundCurrency(inputCost),
-      cached_input_usd: roundCurrency(cachedInputCost),
-      output_usd: roundCurrency(outputCost)
-    },
-    exact: true,
-    basis: "split_token_usage"
+      input_usd: roundCurrency(estimate.components.input_usd),
+      cached_input_usd: roundCurrency(estimate.components.cached_input_usd),
+      output_usd: roundCurrency(estimate.components.output_usd)
+    }
   });
 }
 
-function costEstimateForTokens(tokensValue, modelValue) {
-  const tokens = Math.max(0, Math.round(toNumber(tokensValue, 0)));
-  const modelKey = normalizeModelKey(modelValue);
-  const pricing = MODEL_PRICING_USD_PER_MILLION[modelKey];
-  if (!tokens || !pricing) return null;
-  const low = tokens / 1_000_000 * pricing.input;
-  const high = tokens / 1_000_000 * pricing.output;
-  return formatCostEstimate({
-    low,
-    high,
-    midpoint: (low + high) / 2,
-    pricedTokens: tokens,
-    unpricedTokens: 0,
-    model: modelKey,
-    rates: pricing,
-    basis: "estimated_total_tokens_range"
-  });
+function costEstimateForTokens(tokensValue, modelValue, pricingOverrides = [], at = null) {
+  const estimate = estimateTotalTokenRange(tokensValue, modelValue, { overrides: pricingOverrides, at });
+  return estimate ? formatCostEstimate(estimate) : null;
 }
 
 function formatCostEstimate(data) {
@@ -2460,6 +2669,7 @@ function formatCostEstimate(data) {
     midpoint_display: formatUsd(midpoint),
     priced_tokens: Math.max(0, Math.round(toNumber(data.pricedTokens, 0))),
     unpriced_tokens: Math.max(0, Math.round(toNumber(data.unpricedTokens, 0))),
+    estimated_tokens: Math.max(0, Math.round(toNumber(data.estimatedTokens, 0))),
     exact,
     basis: data.basis || "estimated_total_tokens_range"
   };
@@ -2477,22 +2687,7 @@ function usageSplitPayload(usageSplit) {
 }
 
 function normalizeModelKey(value) {
-  const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-").replace(/\s+/g, "-");
-  if (!raw) return "";
-  if (raw.includes("gpt-5.5")) return "gpt-5.5";
-  if (raw.includes("gpt-5.4-mini")) return "gpt-5.4-mini";
-  if (raw.includes("gpt-5.4-nano")) return "gpt-5.4-nano";
-  if (raw.includes("gpt-5.4")) return "gpt-5.4";
-  if (raw.includes("gpt-5.3-codex")) return "gpt-5.3-codex";
-  if (raw.includes("gpt-5.2-codex")) return "gpt-5.2-codex";
-  if (raw.includes("gpt-5.1-codex-max") || raw.includes("gpt-5.1-codex")) return "gpt-5.1-codex";
-  if (raw.includes("gpt-5-codex")) return "gpt-5-codex";
-  if (raw.includes("gpt-5.2")) return "gpt-5.2";
-  if (raw.includes("gpt-5.1")) return "gpt-5.1";
-  if (raw.includes("gpt-5-mini")) return "gpt-5-mini";
-  if (raw.includes("gpt-5-nano")) return "gpt-5-nano";
-  if (raw === "gpt-5" || raw.startsWith("gpt-5-")) return "gpt-5";
-  return raw;
+  return normalizePricingModelKey(value);
 }
 
 function roundCurrency(value) {
@@ -3303,6 +3498,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  aggregateSplitCost,
+  capTelemetryEvents,
+  codexUsageSplitCoverage,
+  costEstimateForTokens,
+  costEstimateForUsageSplit,
   createServer,
   normalizeConfig,
   computeStats,

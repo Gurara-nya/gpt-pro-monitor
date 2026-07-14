@@ -139,7 +139,9 @@ output/codex-usage/<用户ID>/latest.html
 
 该目录已被 `.gitignore` 排除，不会进入公开仓库。
 
-费用估算使用 OpenAI API Pricing 的标准输入 / 缓存输入 / 输出 token 价格。`state_5.sqlite` 仍只提供 `threads.tokens_used` 总量，面板会额外读取本机 rollout JSONL 里的 `token_count.total_token_usage`，优先按输入、缓存输入和输出拆分计算；拆分缺失时才回退到总 token 区间估算。该估算不是 OpenAI 账单，未计入 Batch、Regional、长上下文或工具费用差异。“消耗仪表盘”分为“概览 / 会话”两个标签；会话标签按需加载，支持标题、ID、目录、模型和来源搜索以及服务端分页。
+API 等价成本估算使用带版本日期的 OpenAI 输入 / 缓存输入 / 输出 Token 价格，也可在设置中按模型和生效日期覆盖。面板流式读取 rollout JSONL 中逐次累计的 `token_count.total_token_usage`，按相邻累计值的正向差值去重，并将消耗归入事件发生时的日期和模型；`state_5.sqlite` 的 `threads.tokens_used` 作为对账总量，缺失拆分的部分按模型生成区间估算。GPT-5.6 会应用超过 272K 输入的长上下文倍率。该结果不是 ChatGPT 套餐账单，也无法识别缓存写入、工具费或其他特殊计费。“消耗仪表盘”分为“概览 / 会话”两个标签；会话标签按需加载，支持标题、ID、目录、模型和来源搜索以及服务端分页。
+
+内置 GPT-5.6 价格目录版本为 `2026-07-14`（输入 / 缓存输入 / 输出，USD / 1M Token）：[Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) 为 `$5 / $0.5 / $30`，[Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra) 为 `$2.5 / $0.25 / $15`，[Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) 为 `$1 / $0.1 / $6`。
 
 页面上方的账号与动态额度窗口仍来自同一个 ChatGPT/Codex 登录；只有“消耗仪表盘”和“会话管理”会按数据用户切换。默认数据用户是 `Gurara`，旧的全局 Codex SQLite 与 Sub2API 配置会自动迁移到这个用户。其他用户可以在设置中新增，再分别上传 SQLite 和保存 Sub2API API key。
 

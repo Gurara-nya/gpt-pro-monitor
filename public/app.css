@@ -1664,6 +1664,47 @@ dialog::backdrop {
   gap: 14px;
 }
 
+.pricing-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.pricing-editor.wide {
+  grid-column: 1 / -1;
+}
+
+.pricing-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pricing-editor-head > span,
+.pricing-editor small {
+  color: var(--muted);
+}
+
+#pricingOverrideRows {
+  display: grid;
+  gap: 8px;
+}
+
+.pricing-override-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.5fr) repeat(3, minmax(86px, 0.8fr)) minmax(132px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.pricing-override-row label {
+  min-width: 0;
+}
+
+.pricing-override-row input {
+  width: 100%;
+}
+
 label {
   display: grid;
   gap: 7px;
@@ -1767,6 +1808,14 @@ input[type="color"] {
 }
 
 @media (max-width: 900px) {
+  .pricing-override-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pricing-override-row .pricing-remove {
+    justify-self: start;
+  }
+
   .window-grid {
     grid-template-columns: 1fr;
   }

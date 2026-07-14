@@ -568,6 +568,10 @@ def build_report(
 
     top_sessions = sorted(normalized, key=lambda row: row["tokens_used"], reverse=True)[:top_limit]
     top_session_rows = [session_summary(row, index) for index, row in enumerate(top_sessions, start=1)]
+    all_session_rows = [
+        session_summary(row, index)
+        for index, row in enumerate(sorted(normalized, key=lambda row: row["tokens_used"], reverse=True), start=1)
+    ]
 
     source_spark = [round(item["tokens"] / 1_000_000, 2) for item in sources[:8]]
     monthly_spark = [round(item["tokens"] / 1_000_000, 2) for item in monthly]
@@ -634,6 +638,7 @@ def build_report(
         "sources": sources,
         "models": models,
         "top_sessions": top_session_rows,
+        "sessions": all_session_rows,
         "queries": {
             "total": total_query,
             "monthly": monthly_query,

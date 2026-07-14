@@ -119,6 +119,7 @@ function wireEvents() {
     fillUsageUserSettings(getUsageUserById(settingsUsageUserId));
   });
   $("#addUsageUserButton").addEventListener("click", addUsageUser);
+  $("#addPricingOverrideButton").addEventListener("click", () => appendPricingOverrideRow());
   $("#codexDbUploadButton").addEventListener("click", uploadCodexDb);
   $("#sub2ApiKeySaveButton").addEventListener("click", saveSub2ApiKey);
   $("#clearButton").addEventListener("click", clearHistory);
@@ -608,10 +609,10 @@ function setCodexMetricValues(totalCost, monthCost, todayCost, totalTokens, mont
 
 function codexCostNote(report) {
   const source = report?.pricing?.source;
-  if (!source) return "费用按 OpenAI 官方输入/输出价格估算。";
+  if (!source) return "API 等价成本按 OpenAI 官方输入/缓存输入/输出价格估算，不是 ChatGPT 套餐账单。";
   const coverage = report?.pricing?.split_coverage;
   const split = coverage?.split_threads
-    ? ` · 已拆分 ${escapeHtml(formatInteger(coverage.split_threads))} 个会话 / ${escapeHtml(formatCompactTokens(coverage.split_tokens))} Token`
+    ? ` · 拆分覆盖 ${escapeHtml(formatPercent(coverage.split_coverage_percent))}（${escapeHtml(formatCompactTokens(coverage.split_tokens))}） · 已定价 ${escapeHtml(formatPercent(coverage.priced_coverage_percent))} · 未拆分 ${escapeHtml(formatCompactTokens(coverage.unparsed_tokens))} · 未定价 ${escapeHtml(formatCompactTokens(coverage.unpriced_tokens))}`
     : "";
   return `价格源：<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.name)}</a> · ${escapeHtml(source.checkedAt || "")}${split} · ${escapeHtml(source.note)}`;
 }
@@ -1248,6 +1249,7 @@ function fillUsageUserSettings(user) {
   $("#settingsCodexDbPath").value = codex.dbPath || "";
   $("#settingsCodexTopSessions").value = codex.topSessions || 10;
   $("#settingsCodexEnabled").checked = codex.enabled !== false;
+  renderPricingOverrideRows(codex.pricingOverrides);
   $("#settingsSub2ApiBaseUrl").value = sub2api.baseUrl || "http://192.168.31.114:7999";
   $("#settingsSub2ApiKey").value = "";
   $("#settingsSub2ApiStartDate").value = sub2api.startDate || "";
@@ -1291,7 +1293,8 @@ function readUsageUserSettingsIntoConfig(config) {
     ...(user.codexUsage || {}),
     enabled: $("#settingsCodexEnabled").checked,
     dbPath: $("#settingsCodexDbPath").value.trim(),
-    topSessions: Number($("#settingsCodexTopSessions").value) || 10
+    topSessions: Number($("#settingsCodexTopSessions").value) || 10,
+    pricingOverrides: readPricingOverrideRows()
   };
   user.sub2api = {
     ...(user.sub2api || {}),
@@ -1303,6 +1306,37 @@ function readUsageUserSettingsIntoConfig(config) {
   config.activeUsageUserId = user.id;
   selectedUsageUserId = user.id;
   localStorage.setItem("gpt-monitor-usage-user", selectedUsageUserId);
+}
+
+function renderPricingOverrideRows(overrides) {
+  const rows = Array.isArray(overrides) ? overrides : [];
+  $("#pricingOverrideRows").innerHTML = "";
+  for (const override of rows) appendPricingOverrideRow(override);
+}
+
+function appendPricingOverrideRow(override = {}) {
+  const row = document.createElement("div");
+  row.className = "pricing-override-row";
+  row.innerHTML = `
+    <label><span>模型</span><input data-price="model" value="${escapeAttr(override.model || "")}" placeholder="gpt-5.6-terra" autocomplete="off" /></label>
+    <label><span>输入</span><input data-price="input" type="number" min="0" step="0.001" value="${escapeAttr(override.input ?? "")}" /></label>
+    <label><span>缓存输入</span><input data-price="cachedInput" type="number" min="0" step="0.001" value="${escapeAttr(override.cachedInput ?? "")}" /></label>
+    <label><span>输出</span><input data-price="output" type="number" min="0" step="0.001" value="${escapeAttr(override.output ?? "")}" /></label>
+    <label><span>生效日期</span><input data-price="effectiveDate" type="date" value="${escapeAttr(override.effectiveDate || "")}" /></label>
+    <button class="text-button pricing-remove" type="button" aria-label="删除此价格">删除</button>
+  `;
+  row.querySelector(".pricing-remove").addEventListener("click", () => row.remove());
+  $("#pricingOverrideRows").append(row);
+}
+
+function readPricingOverrideRows() {
+  return $$(".pricing-override-row", $("#pricingOverrideRows")).map((row) => ({
+    model: row.querySelector('[data-price="model"]').value.trim(),
+    input: Number(row.querySelector('[data-price="input"]').value),
+    cachedInput: Number(row.querySelector('[data-price="cachedInput"]').value),
+    output: Number(row.querySelector('[data-price="output"]').value),
+    effectiveDate: row.querySelector('[data-price="effectiveDate"]').value
+  })).filter((item) => item.model && item.input >= 0 && item.output > 0);
 }
 
 async function addUsageUser() {
@@ -1322,7 +1356,8 @@ async function addUsageUser() {
       dbPath: "",
       uploadedFileName: "",
       uploadedAt: null,
-      topSessions: 10
+      topSessions: 10,
+      pricingOverrides: []
     },
     sub2api: {
       enabled: false,

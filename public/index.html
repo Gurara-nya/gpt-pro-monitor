@@ -104,17 +104,17 @@
           <div class="token-tab-panel" id="codexOverviewPanel" role="tabpanel" aria-labelledby="codexOverviewTab">
             <div class="token-metrics">
               <div class="token-metric token-metric-primary">
-                <span>累计费用估算</span>
+                <span>累计 API 等价成本</span>
                 <strong id="codexTotalCost">--</strong>
                 <small id="codexTotalCostDetail">--</small>
               </div>
               <div class="token-metric token-metric-primary">
-                <span>本月费用估算</span>
+                <span>本月 API 等价成本</span>
                 <strong id="codexMonthCost">--</strong>
                 <small id="codexMonthCostDetail">--</small>
               </div>
               <div class="token-metric token-metric-primary">
-                <span>今日费用估算</span>
+                <span>今日 API 等价成本</span>
                 <strong id="codexTodayCost">--</strong>
                 <small id="codexTodayCostDetail">--</small>
               </div>
@@ -131,7 +131,7 @@
                 <strong id="codexMonthThreads">--</strong>
               </div>
             </div>
-            <p class="token-cost-note" id="codexCostNote">费用按 OpenAI 官方输入/输出价格估算。</p>
+            <p class="token-cost-note" id="codexCostNote">API 等价成本按 OpenAI 官方输入/缓存输入/输出价格估算，不是 ChatGPT 套餐账单。</p>
 
             <div class="token-breakdowns">
               <section class="token-daily" aria-label="日消耗">
@@ -272,6 +272,14 @@
                 <input id="settingsCodexEnabled" type="checkbox" />
                 <span>启用 Token 面板</span>
               </label>
+              <div class="pricing-editor wide">
+                <div class="pricing-editor-head">
+                  <span>模型价格覆盖（USD / 1M Token）</span>
+                  <button class="text-button" id="addPricingOverrideButton" type="button">添加价格</button>
+                </div>
+                <div id="pricingOverrideRows"></div>
+                <small>留空时使用带版本日期的 OpenAI 官方价格。费用均为 API 等价成本估算。</small>
+              </div>
               <button class="text-button" id="addUsageUserButton" type="button">新增用户</button>
               <button class="text-button" id="codexDbUploadButton" type="button">上传并刷新</button>
             </div>
