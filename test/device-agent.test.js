@@ -39,3 +39,16 @@ test("device agent performs a full scan once and then reads only appended bytes"
   assert.equal(second.events[0].usage.total_tokens, 50);
   assert.equal(second.cursor.offset, (await fs.stat(file)).size);
 });
+
+test("device agent keeps the filename thread ID for forked rollout history", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gpt-monitor-agent-fork-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "rollout-2026-07-14T00-00-00-current-thread.jsonl");
+  await fs.writeFile(file, [
+    row("session_meta", { id: "ancestor-thread" }),
+    token(100, 80, 20, "2026-07-14T00:01:00Z")
+  ].join("\n") + "\n");
+  const result = await scanFile(file);
+  assert.equal(result.cursor.threadId, "current-thread");
+  assert.equal(result.events[0].threadHash, require("node:crypto").createHash("sha256").update("current-thread").digest("hex"));
+});

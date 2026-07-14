@@ -161,12 +161,16 @@ async function* completeLines(filePath, start, end) {
 
 async function scanFile(filePath, cursor = {}) {
   const stat = await fsp.stat(filePath);
+  const fileThreadId = idFromPath(filePath);
   let offset = Math.min(count(cursor.offset), stat.size);
-  if (stat.size < count(cursor.offset)) offset = 0;
+  if (stat.size < count(cursor.offset) || cursor.parserVersion !== 2 || (fileThreadId && cursor.threadId !== fileThreadId)) {
+    offset = 0;
+  }
   const state = offset ? { ...cursor } : {
+    parserVersion: 2,
     offset: 0,
-    threadId: idFromPath(filePath),
-    threadHash: sha(idFromPath(filePath)),
+    threadId: fileThreadId,
+    threadHash: sha(fileThreadId),
     model: "",
     provider: "",
     previousUsage: {}
@@ -182,7 +186,7 @@ async function scanFile(filePath, cursor = {}) {
     const payload = item?.payload;
     if (!payload || typeof payload !== "object") continue;
     if (item.type === "session_meta") {
-      if (payload.id) {
+      if (payload.id && !fileThreadId) {
         state.threadId = String(payload.id);
         state.threadHash = sha(state.threadId);
       }

@@ -73,3 +73,12 @@ test("local and remote collectors derive the same device-independent event ID", 
   const cumulative = { input_tokens: 80, cached_input_tokens: 20, output_tokens: 20, reasoning_output_tokens: 10, total_tokens: 100 };
   assert.equal(eventIdentity("thread-shared", cumulative), agentEventId(threadHash("thread-shared"), cumulative));
 });
+
+test("rollout filename remains authoritative when a fork carries ancestor session metadata", async () => {
+  const record = await parseRolloutLines([
+    line("session_meta", { id: "ancestor-thread" }),
+    token({ input_tokens: 80, output_tokens: 20, total_tokens: 100 })
+  ], { filePath: "rollout-2026-07-14T00-00-00-current-thread.jsonl" });
+  assert.equal(record.threadId, "current-thread");
+  assert.equal(record.events[0].threadId, "current-thread");
+});
