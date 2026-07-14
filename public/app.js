@@ -499,6 +499,7 @@ function renderCodexUsage() {
     $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexTopSessions").innerHTML = `<div class="empty-state">${escapeHtml(codexUsageState?.message || "等待 Token 数据")}</div>`;
     $("#deviceBreakdownList").innerHTML = `<div class="empty-state">等待设备数据</div>`;
+    $("#deviceBreakdownPeriod").textContent = "等待设备月度数据";
     $("#codexSessionCount").textContent = "默认收起";
     renderCodexSessionManager();
     return;
@@ -523,7 +524,10 @@ function renderCodexUsage() {
     }
   );
   $("#codexCostNote").innerHTML = codexCostNote(report);
-  renderDeviceBreakdown(report.device_breakdown || []);
+  const deviceBreakdown = selectedView?.month
+    ? report.device_breakdown_by_month?.[selectedView.month]
+    : report.device_breakdown;
+  renderDeviceBreakdown(deviceBreakdown || [], selectedView?.month || "");
   $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
   setupDailyScroller($("#codexDailyList .token-daily-scroll"));
   $("#codexSourceList").innerHTML = renderCodexBars(selectedView?.sources || report.sources || [], "source");
@@ -562,10 +566,16 @@ function renderDeviceSelect() {
   select.hidden = devices.length <= 1;
 }
 
-function renderDeviceBreakdown(devices) {
+function renderDeviceBreakdown(devices, month = "") {
   const list = $("#deviceBreakdownList");
+  const period = $("#deviceBreakdownPeriod");
+  if (period) {
+    period.textContent = month
+      ? `${formatMonthLabel(month)} · 按总 Token 统计，成本占比使用 API 等价成本`
+      : "累计 · 按总 Token 统计，成本占比使用 API 等价成本";
+  }
   if (!Array.isArray(devices) || !devices.length) {
-    list.innerHTML = `<div class="empty-state">暂无设备数据</div>`;
+    list.innerHTML = `<div class="empty-state">${month ? `${escapeHtml(formatMonthLabel(month))} 暂无设备用量` : "暂无设备数据"}</div>`;
     return;
   }
   list.innerHTML = devices.map((device) => {
@@ -583,7 +593,7 @@ function renderDeviceBreakdown(devices) {
           <div><dt>输入</dt><dd>${formatCompactTokens(usage.input_tokens)}</dd></div>
           <div><dt>缓存输入</dt><dd>${formatCompactTokens(usage.cached_input_tokens)}</dd></div>
           <div><dt>输出</dt><dd>${formatCompactTokens(usage.output_tokens)}</dd></div>
-          <div><dt>API 等价成本</dt><dd>${escapeHtml(device.cost_estimate?.midpoint_display || "--")}</dd></div>
+          <div><dt>API 等价成本 / 占比</dt><dd>${escapeHtml(device.cost_estimate?.midpoint_display || "--")} · ${formatPercent(device.cost_share_percent)}</dd></div>
           <div><dt>拆分覆盖</dt><dd>${formatPercent(device.coverage_percent)}</dd></div>
         </dl>
       </article>

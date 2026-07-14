@@ -5,7 +5,8 @@ const assert = require("node:assert/strict");
 const {
   aggregateSplitCost,
   capTelemetryEvents,
-  codexUsageSplitCoverage
+  codexUsageSplitCoverage,
+  deviceBreakdownForPeriod
 } = require("../server");
 
 function usage(input, output, cached = 0, reasoning = 0) {
@@ -77,4 +78,38 @@ test("coverage distinguishes parsed, priced, unparsed and unpriced tokens", () =
   assert.equal(coverage.priced_coverage_percent, 100);
   assert.equal(coverage.unparsed_tokens, 100);
   assert.equal(coverage.unpriced_tokens, 0);
+});
+
+test("device breakdown uses the selected month denominator and monthly coverage", () => {
+  const devices = [{ id: "local", name: "Local" }, { id: "remote", name: "Remote" }];
+  const cost = (tokens) => ({ midpoint_usd: tokens / 10, midpoint_display: `$${tokens / 10}` });
+  const views = {
+    local: {
+      summary: { total_tokens: 70, usage_split: usage(60, 10), cost_estimate: cost(70) },
+      month_views: [{ month: "2026-07", tokens: 20, usage_split: usage(15, 5), cost_estimate: cost(20) }]
+    },
+    remote: {
+      summary: { total_tokens: 30, usage_split: usage(20, 10), cost_estimate: cost(30) },
+      month_views: [{ month: "2026-07", tokens: 40, usage_split: usage(30, 10), cost_estimate: cost(40) }]
+    }
+  };
+  const allView = {
+    summary: { total_tokens: 100, cost_estimate: cost(100) },
+    month_views: [{ month: "2026-07", tokens: 60, cost_estimate: cost(60) }]
+  };
+  const records = new Map([
+    ["local", [{ month: "2026-07", usageSplit: usage(15, 5) }]],
+    ["remote", [
+      { month: "2026-07", usageSplit: usage(20, 10) },
+      { month: "2026-07", estimated: true, usageSplit: usage(10, 0) }
+    ]]
+  ]);
+
+  const cumulative = deviceBreakdownForPeriod(devices, views, records, allView);
+  const july = deviceBreakdownForPeriod(devices, views, records, allView, "2026-07");
+  assert.deepEqual(cumulative.map((item) => item.share_percent), [70, 30]);
+  assert.deepEqual(july.map((item) => item.share_percent), [33.33, 66.67]);
+  assert.deepEqual(july.map((item) => item.cost_share_percent), [33.33, 66.67]);
+  assert.deepEqual(july.map((item) => item.coverage_percent), [100, 75]);
+  assert.equal(july[1].period_month, "2026-07");
 });

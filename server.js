@@ -1698,22 +1698,17 @@ async function enrichReportWithDevices(report, usageDetails, user) {
   report.sessions = allSessions;
   report.session_summary = buildSessionSummaryFromRows(allSessions);
   report.device_views = views;
-  report.device_breakdown = deviceData.devices.map((device) => {
-    const view = views[device.id] || buildDeviceUsageView([], []);
-    const total = nonnegativeInteger(view.summary.total_tokens);
-    const exact = (device.id === "local" ? localRecords : remoteRecords.filter((record) => record.deviceId === device.id))
-      .filter((record) => !record.estimated)
-      .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
-    return {
-      ...device,
-      total_tokens: total,
-      usage_split: view.summary.usage_split,
-      cost_estimate: view.summary.cost_estimate,
-      exact_tokens: exact,
-      coverage_percent: total ? Math.round(exact / total * 10000) / 100 : 0,
-      share_percent: allView.summary.total_tokens ? Math.round(total / allView.summary.total_tokens * 10000) / 100 : 0
-    };
-  });
+  const recordsByDevice = new Map(deviceData.devices.map((device) => [
+    device.id,
+    device.id === "local" ? localRecords : remoteRecords.filter((record) => record.deviceId === device.id)
+  ]));
+  report.device_breakdown = deviceBreakdownForPeriod(deviceData.devices, views, recordsByDevice, allView);
+  report.device_breakdown_by_month = Object.fromEntries(
+    (allView.month_views || []).map((monthView) => [
+      monthView.month,
+      deviceBreakdownForPeriod(deviceData.devices, views, recordsByDevice, allView, monthView.month)
+    ])
+  );
   const exactRecords = allRecords.filter((record) => !record.estimated);
   const exactUsage = createUsageGroup().usageSplit;
   for (const record of exactRecords) addUsageSplit(exactUsage, record.usageSplit);
@@ -1736,6 +1731,40 @@ async function enrichReportWithDevices(report, usageDetails, user) {
     });
   }
   return report;
+}
+
+function deviceBreakdownForPeriod(devices, views, recordsByDevice, allView, month = "") {
+  const periodMonth = /^\d{4}-\d{2}$/.test(String(month || "")) ? String(month) : "";
+  const allPeriod = periodMonth
+    ? (allView?.month_views || []).find((item) => item.month === periodMonth)
+    : allView?.summary;
+  const allTokens = nonnegativeInteger(periodMonth ? allPeriod?.tokens : allPeriod?.total_tokens);
+  const allCost = Math.max(0, Number(allPeriod?.cost_estimate?.midpoint_usd) || 0);
+  const emptyUsage = usageSplitPayload(createUsageGroup().usageSplit);
+
+  return (devices || []).map((device) => {
+    const deviceView = views?.[device.id];
+    const period = periodMonth
+      ? (deviceView?.month_views || []).find((item) => item.month === periodMonth)
+      : deviceView?.summary;
+    const total = nonnegativeInteger(periodMonth ? period?.tokens : period?.total_tokens);
+    const records = recordsByDevice?.get(device.id) || [];
+    const exact = records
+      .filter((record) => !record.estimated && (!periodMonth || record.month === periodMonth))
+      .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+    const deviceCost = Math.max(0, Number(period?.cost_estimate?.midpoint_usd) || 0);
+    return {
+      ...device,
+      period_month: periodMonth || null,
+      total_tokens: total,
+      usage_split: period?.usage_split || emptyUsage,
+      cost_estimate: period?.cost_estimate || null,
+      exact_tokens: exact,
+      coverage_percent: total ? Math.round(Math.min(exact, total) / total * 10000) / 100 : 0,
+      share_percent: allTokens ? Math.round(total / allTokens * 10000) / 100 : 0,
+      cost_share_percent: allCost ? Math.round(deviceCost / allCost * 10000) / 100 : 0
+    };
+  });
 }
 
 function buildRemoteDeviceSessions(records, devices) {
@@ -3899,6 +3928,7 @@ module.exports = {
   costEstimateForTokens,
   costEstimateForUsageSplit,
   createServer,
+  deviceBreakdownForPeriod,
   normalizeConfig,
   computeStats,
   runProbe,

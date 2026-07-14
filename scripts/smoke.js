@@ -46,6 +46,10 @@ async function main() {
     assert.equal(usage.report.sessions, undefined);
     assert.equal(usage.report.device_views, undefined);
     assert.equal(Array.isArray(usage.report.device_breakdown), true);
+    assert.equal(typeof usage.report.device_breakdown_by_month, "object");
+    for (const month of usage.report.month_views || []) {
+      assert.equal(Array.isArray(usage.report.device_breakdown_by_month[month.month]), true);
+    }
   }
 
   const devices = await request(`/api/devices?userId=${encodeURIComponent(userId)}`);
