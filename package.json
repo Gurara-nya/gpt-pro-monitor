@@ -6,6 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/session-query.test.js",
     "smoke": "node scripts/smoke.js",
     "secret": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\"",
     "codex:usage": "node scripts/codex-usage-probe.js",

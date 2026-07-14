@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 
-const baseUrl = process.env.GPT_MONITOR_BASE_URL || "http://127.0.0.1:8787";
+const baseUrl = (process.env.GPT_MONITOR_BASE_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
 const accessSecret = process.env.GPT_MONITOR_ACCESS_TOKEN || process.env.GPT_MONITOR_PASSWORD || "";
 const accessUser = process.env.GPT_MONITOR_USERNAME || "monitor";
 
@@ -38,14 +38,41 @@ async function main() {
   assert.equal(Array.isArray(state.config.usageUsers), true);
   assert.equal(typeof state.config.activeUsageUserId, "string");
   assert.equal(typeof state.computed.status, "string");
+  assert.equal(state.checks.every((check) => check.detail === undefined && check.account === undefined), true);
+
+  const userId = state.config.activeUsageUserId;
+  const usage = await request(`/api/codex-usage?userId=${encodeURIComponent(userId)}`);
+  if (usage.report) assert.equal(usage.report.sessions, undefined);
+
+  const sessions = await request(
+    `/api/codex-usage/sessions?userId=${encodeURIComponent(userId)}&sort=tokens_desc&page=1&pageSize=2`
+  );
+  assert.equal(Array.isArray(sessions.items), true);
+  assert.equal(Array.isArray(sessions.months), true);
+  assert.equal(typeof sessions.summary, "object");
+  assert.equal(sessions.items.length <= 2, true);
+  assert.equal(sessions.pagination.pageSize, 2);
+  assert.equal(typeof sessions.pagination.totalItems, "number");
 
   const exported = await request("/api/export");
   assert.equal(typeof exported.config.account.label, "string");
   assert.equal(Array.isArray(exported.config.usageUsers), true);
+  assert.equal(Array.isArray(exported.checks), true);
 
   const html = await fetch(baseUrl, { headers: authHeaders() }).then((response) => response.text());
   assert.match(html, /GPT Pro Monitor/);
   assert.doesNotMatch(html, /unpkg\.com|cdn\.jsdelivr\.net/);
+
+  const origin = new URL(baseUrl).origin;
+  const aliasResponse = await fetch(`${origin}/monitor/`, { headers: authHeaders() });
+  assert.equal(aliasResponse.ok, true, `/monitor/ returned ${aliasResponse.status}`);
+  assert.match(await aliasResponse.text(), /GPT Pro Monitor/);
+
+  if (accessSecret) {
+    const unauthorized = await fetch(`${baseUrl}/api/state`);
+    assert.equal(unauthorized.status, 401);
+    assert.match(unauthorized.headers.get("www-authenticate") || "", /^Basic /);
+  }
 
   console.log(`Smoke checks passed for ${baseUrl}`);
 }

@@ -119,7 +119,7 @@
             <div class="token-title">
               <p>Codex Token</p>
               <h2>消耗仪表盘</h2>
-              <small id="codexUsageStatus">等待同步</small>
+              <small id="codexUsageStatus" role="status" aria-live="polite">等待同步</small>
             </div>
             <div class="token-actions">
               <select id="usageUserSelect" aria-label="选择数据用户"></select>
@@ -134,67 +134,79 @@
             </div>
           </div>
 
-          <div class="token-metrics">
-            <div class="token-metric">
-              <span>累计费用估算</span>
-              <strong id="codexTotalCost">--</strong>
-              <small id="codexTotalCostDetail">--</small>
-            </div>
-            <div class="token-metric">
-              <span>本月费用估算</span>
-              <strong id="codexMonthCost">--</strong>
-              <small id="codexMonthCostDetail">--</small>
-            </div>
-            <div class="token-metric">
-              <span>今日费用估算</span>
-              <strong id="codexTodayCost">--</strong>
-              <small id="codexTodayCostDetail">--</small>
-            </div>
-            <div class="token-metric">
-              <span>累计 Token</span>
-              <strong id="codexTotalTokens">--</strong>
-            </div>
-            <div class="token-metric">
-              <span>本月 Token</span>
-              <strong id="codexMonthTokens">--</strong>
-            </div>
-            <div class="token-metric">
-              <span>本月会话 / 均值</span>
-              <strong id="codexMonthThreads">--</strong>
-            </div>
-          </div>
-          <p class="token-cost-note" id="codexCostNote">费用按 OpenAI 官方输入/输出价格估算。</p>
-
-          <div class="token-breakdowns">
-            <section class="token-daily" aria-label="日消耗">
-              <h3>日消耗</h3>
-              <div class="token-daily-list" id="codexDailyList"></div>
-            </section>
-            <section aria-label="主要入口">
-              <h3>主要入口</h3>
-              <div class="token-bars" id="codexSourceList"></div>
-            </section>
-            <section aria-label="模型分布">
-              <h3>模型分布</h3>
-              <div class="token-bars" id="codexModelList"></div>
-            </section>
-            <details class="token-sessions" aria-label="高消耗会话">
-              <summary>
-                <span>高消耗会话</span>
-                <b id="codexSessionCount">默认收起</b>
-              </summary>
-              <div id="codexTopSessions"></div>
-            </details>
+          <div class="token-tabs" role="tablist" aria-label="消耗仪表盘视图">
+            <button class="token-tab" id="codexOverviewTab" type="button" role="tab" aria-controls="codexOverviewPanel">
+              概览
+            </button>
+            <button class="token-tab" id="codexSessionsTab" type="button" role="tab" aria-controls="codexSessionsPanel">
+              会话
+            </button>
           </div>
 
-          <section class="session-manager" aria-label="会话管理">
+          <div class="token-tab-panel" id="codexOverviewPanel" role="tabpanel" aria-labelledby="codexOverviewTab">
+            <div class="token-metrics">
+              <div class="token-metric token-metric-primary">
+                <span>累计费用估算</span>
+                <strong id="codexTotalCost">--</strong>
+                <small id="codexTotalCostDetail">--</small>
+              </div>
+              <div class="token-metric token-metric-primary">
+                <span>本月费用估算</span>
+                <strong id="codexMonthCost">--</strong>
+                <small id="codexMonthCostDetail">--</small>
+              </div>
+              <div class="token-metric token-metric-primary">
+                <span>今日费用估算</span>
+                <strong id="codexTodayCost">--</strong>
+                <small id="codexTodayCostDetail">--</small>
+              </div>
+              <div class="token-metric">
+                <span>累计 Token</span>
+                <strong id="codexTotalTokens">--</strong>
+              </div>
+              <div class="token-metric">
+                <span>本月 Token</span>
+                <strong id="codexMonthTokens">--</strong>
+              </div>
+              <div class="token-metric">
+                <span>本月会话 / 均值</span>
+                <strong id="codexMonthThreads">--</strong>
+              </div>
+            </div>
+            <p class="token-cost-note" id="codexCostNote">费用按 OpenAI 官方输入/输出价格估算。</p>
+
+            <div class="token-breakdowns">
+              <section class="token-daily" aria-label="日消耗">
+                <h3>日消耗</h3>
+                <div class="token-daily-list" id="codexDailyList"></div>
+              </section>
+              <section aria-label="主要入口">
+                <h3>主要入口</h3>
+                <div class="token-bars" id="codexSourceList"></div>
+              </section>
+              <section aria-label="模型分布">
+                <h3>模型分布</h3>
+                <div class="token-bars" id="codexModelList"></div>
+              </section>
+              <details class="token-sessions" aria-label="高消耗会话">
+                <summary>
+                  <span>高消耗会话</span>
+                  <b id="codexSessionCount">默认收起</b>
+                </summary>
+                <div id="codexTopSessions"></div>
+              </details>
+            </div>
+          </div>
+
+          <section class="session-manager token-tab-panel" id="codexSessionsPanel" role="tabpanel" aria-labelledby="codexSessionsTab" hidden>
             <div class="session-manager-head">
               <div>
                 <p>Sessions</p>
                 <h3>会话管理</h3>
+                <small id="codexSessionStatus" role="status" aria-live="polite">打开后加载会话</small>
               </div>
               <div class="session-controls">
-                <input id="codexSessionSearch" type="search" placeholder="搜索标题、ID、目录、模型" autocomplete="off" />
+                <input id="codexSessionSearch" type="search" aria-label="搜索会话" placeholder="搜索标题、ID、目录、模型" autocomplete="off" />
                 <select id="codexSessionMonthFilter" aria-label="筛选会话月份"></select>
                 <select id="codexSessionSort" aria-label="会话排序">
                   <option value="tokens_desc">Token 从高到低</option>
@@ -206,9 +218,17 @@
             </div>
             <div class="session-summary" id="codexSessionSummary"></div>
             <div class="session-list" id="codexSessionList"></div>
-            <button class="history-list-toggle" id="codexSessionMoreButton" type="button" hidden>
-              显示更多
-            </button>
+            <nav class="session-pagination" aria-label="会话分页">
+              <button class="text-button" id="codexSessionPrevButton" type="button">
+                <i data-lucide="chevron-left"></i>
+                <span>上一页</span>
+              </button>
+              <span id="codexSessionPageInfo" role="status" aria-live="polite">第 1 / 1 页</span>
+              <button class="text-button" id="codexSessionNextButton" type="button">
+                <span>下一页</span>
+                <i data-lucide="chevron-right"></i>
+              </button>
+            </nav>
           </section>
         </section>
       </main>

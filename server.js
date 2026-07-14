@@ -7,6 +7,7 @@ const { execFile } = require("node:child_process");
 const { existsSync, statSync } = require("node:fs");
 const { mkdir, readFile, readdir, rename, writeFile } = require("node:fs/promises");
 const { promisify } = require("node:util");
+const { querySessions } = require("./lib/session-query");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
@@ -505,11 +506,66 @@ function statusText(status) {
 
 async function getState() {
   const [config, checks] = await Promise.all([loadConfig(), loadChecks()]);
+  const computed = computeStats(config, checks);
   return {
     generatedAt: new Date().toISOString(),
     config,
-    computed: computeStats(config, checks),
-    checks: checks.slice().reverse().slice(0, 200)
+    computed: publicComputedStats(computed),
+    checks: checks.slice().reverse().slice(0, 200).map(publicHistoryCheck)
+  };
+}
+
+function publicUsageWindow(window) {
+  if (!window || typeof window !== "object") return null;
+  return {
+    label: cleanString(window.label, "", 80),
+    usedPercent: toNullableNumber(window.usedPercent),
+    remainingPercent: toNullableNumber(window.remainingPercent),
+    resetAt: validIsoOrNull(window.resetAt),
+    resetAfterSeconds: toNullableNumber(window.resetAfterSeconds),
+    resetAfterLabel: cleanString(window.resetAfterLabel, "", 80),
+    windowSeconds: toNullableNumber(window.windowSeconds),
+    windowLabel: cleanString(window.windowLabel, "", 80)
+  };
+}
+
+function publicUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  return {
+    planType: cleanString(usage.planType, "", 80),
+    primaryWindow: publicUsageWindow(usage.primaryWindow),
+    secondaryWindow: publicUsageWindow(usage.secondaryWindow)
+  };
+}
+
+function publicHistoryCheck(check) {
+  if (!check) return null;
+  return {
+    id: check.id,
+    at: check.at,
+    reason: check.reason,
+    status: check.status,
+    usage: publicUsage(check.usage)
+  };
+}
+
+function publicComputedCheck(check) {
+  if (!check) return null;
+  return {
+    ...publicHistoryCheck(check),
+    message: check.message,
+    latencyMs: check.latencyMs,
+    planType: check.planType,
+    account: check.account
+  };
+}
+
+function publicComputedStats(computed) {
+  return {
+    ...computed,
+    latestCheck: publicComputedCheck(computed.latestCheck),
+    previousCheck: publicComputedCheck(computed.previousCheck),
+    quota: publicUsage(computed.quota)
   };
 }
 
@@ -826,6 +882,37 @@ function attachUsageUser(result, user) {
   return {
     ...result,
     user: publicUsageUser(user)
+  };
+}
+
+function publicCodexUsageState(result) {
+  if (!result || typeof result !== "object") return result;
+  if (!result.report || typeof result.report !== "object") return result;
+  const report = { ...result.report };
+  delete report.sessions;
+  return {
+    ...result,
+    report
+  };
+}
+
+async function getCodexUsageSessionsState(searchParams) {
+  const userId = searchParams.get("userId");
+  const result = await getCodexUsageState({ userId });
+  const sessions = Array.isArray(result?.report?.sessions) ? result.report.sessions : [];
+  const page = querySessions(sessions, {
+    q: searchParams.get("q"),
+    month: searchParams.get("month"),
+    sort: searchParams.get("sort"),
+    page: searchParams.get("page"),
+    pageSize: searchParams.get("pageSize")
+  });
+  return {
+    status: result.status,
+    generatedAt: result.generatedAt,
+    message: result.message,
+    user: result.user,
+    ...page
   };
 }
 
@@ -3035,26 +3122,29 @@ async function saveSub2ApiKey(req, userId) {
 async function handleApi(req, res, url) {
   const codexDbUploadMatch = /^\/api\/users\/([^/]+)\/codex-db$/.exec(url.pathname);
   if (req.method === "PUT" && codexDbUploadMatch) {
-    return sendJson(res, 200, await saveCodexDbUpload(req, codexDbUploadMatch[1]));
+    return sendJson(res, 200, publicCodexUsageState(await saveCodexDbUpload(req, codexDbUploadMatch[1])));
   }
   const sub2ApiKeyMatch = /^\/api\/users\/([^/]+)\/sub2api-key$/.exec(url.pathname);
   if (req.method === "PUT" && sub2ApiKeyMatch) {
-    return sendJson(res, 200, await saveSub2ApiKey(req, sub2ApiKeyMatch[1]));
+    return sendJson(res, 200, publicCodexUsageState(await saveSub2ApiKey(req, sub2ApiKeyMatch[1])));
   }
   if (req.method === "GET" && url.pathname === "/api/state") {
     return sendJson(res, 200, await getState());
   }
   if (req.method === "GET" && url.pathname === "/api/codex-usage") {
-    return sendJson(res, 200, await getCodexUsageState({
+    return sendJson(res, 200, publicCodexUsageState(await getCodexUsageState({
       userId: url.searchParams.get("userId")
-    }));
+    })));
+  }
+  if (req.method === "GET" && url.pathname === "/api/codex-usage/sessions") {
+    return sendJson(res, 200, await getCodexUsageSessionsState(url.searchParams));
   }
   if (req.method === "POST" && url.pathname === "/api/codex-usage/refresh") {
     const body = await parseBody(req);
-    return sendJson(res, 200, await getCodexUsageState({
+    return sendJson(res, 200, publicCodexUsageState(await getCodexUsageState({
       force: true,
       userId: body.userId || url.searchParams.get("userId")
-    }));
+    })));
   }
   if (req.method === "POST" && url.pathname === "/api/codex-usage/report") {
     const body = await parseBody(req);

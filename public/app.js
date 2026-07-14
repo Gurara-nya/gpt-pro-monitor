@@ -42,7 +42,13 @@ let codexUsageMonth = "";
 let codexSessionQuery = "";
 let codexSessionMonth = "all";
 let codexSessionSort = "tokens_desc";
-let codexSessionVisible = 30;
+let codexSessionPage = 1;
+let codexSessionState = null;
+let codexSessionLoading = false;
+let codexSessionError = "";
+let codexSessionSearchTimer = null;
+let codexSessionAbortController = null;
+let codexActiveTab = localStorage.getItem("gpt-monitor-codex-tab") === "sessions" ? "sessions" : "overview";
 let selectedUsageUserId = localStorage.getItem("gpt-monitor-usage-user") || "";
 let settingsUsageUserId = "";
 let toastTimer = null;
@@ -54,9 +60,11 @@ let historyListExpanded = false;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const APP_BASE_PATH = detectAppBasePath();
+const CODEX_SESSION_MOBILE = window.matchMedia("(max-width: 560px)");
 
 document.addEventListener("DOMContentLoaded", () => {
   wireEvents();
+  setCodexTab(codexActiveTab, { load: false });
   refreshState({ quiet: true });
   refreshCodexUsage({ quiet: true });
   setInterval(() => refreshState({ quiet: true }), 30000);
@@ -71,25 +79,37 @@ function wireEvents() {
     codexUsageMonth = event.target.value;
     renderCodexUsage();
   });
+  $("#codexOverviewTab").addEventListener("click", () => setCodexTab("overview"));
+  $("#codexSessionsTab").addEventListener("click", () => setCodexTab("sessions"));
+  $(".token-tabs").addEventListener("keydown", handleCodexTabKeydown);
   $("#codexSessionSearch").addEventListener("input", (event) => {
     codexSessionQuery = event.target.value;
-    codexSessionVisible = 30;
-    renderCodexUsage();
+    codexSessionPage = 1;
+    clearTimeout(codexSessionSearchTimer);
+    codexSessionSearchTimer = setTimeout(() => refreshCodexSessions({ quiet: true }), 250);
   });
   $("#codexSessionMonthFilter").addEventListener("change", (event) => {
     codexSessionMonth = event.target.value;
-    codexSessionVisible = 30;
-    renderCodexUsage();
+    codexSessionPage = 1;
+    refreshCodexSessions({ quiet: true });
   });
   $("#codexSessionSort").addEventListener("change", (event) => {
     codexSessionSort = event.target.value;
-    codexSessionVisible = 30;
-    renderCodexUsage();
+    codexSessionPage = 1;
+    refreshCodexSessions({ quiet: true });
   });
-  $("#codexSessionMoreButton").addEventListener("click", () => {
-    codexSessionVisible += 30;
-    renderCodexUsage();
+  $("#codexSessionPrevButton").addEventListener("click", () => {
+    if (codexSessionPage <= 1) return;
+    codexSessionPage -= 1;
+    refreshCodexSessions({ quiet: true, scroll: true });
   });
+  $("#codexSessionNextButton").addEventListener("click", () => {
+    const totalPages = Number(codexSessionState?.pagination?.totalPages) || 1;
+    if (codexSessionPage >= totalPages) return;
+    codexSessionPage += 1;
+    refreshCodexSessions({ quiet: true, scroll: true });
+  });
+  CODEX_SESSION_MOBILE.addEventListener?.("change", handleCodexSessionBreakpoint);
   $("#settingsButton").addEventListener("click", openSettings);
   $("#closeSettingsButton").addEventListener("click", closeSettings);
   $("#cancelSettingsButton").addEventListener("click", closeSettings);
@@ -146,6 +166,54 @@ function appUrl(path) {
   return `${APP_BASE_PATH}${normalized}`;
 }
 
+function preferredCodexSessionPageSize() {
+  return CODEX_SESSION_MOBILE.matches ? 10 : 20;
+}
+
+function setCodexTab(tab, { load = true, focus = false } = {}) {
+  codexActiveTab = tab === "sessions" ? "sessions" : "overview";
+  localStorage.setItem("gpt-monitor-codex-tab", codexActiveTab);
+  renderCodexTabs();
+  if (focus) {
+    $(`#codex${codexActiveTab === "sessions" ? "Sessions" : "Overview"}Tab`)?.focus();
+  }
+  if (load && codexActiveTab === "sessions") {
+    const loadedUserId = codexSessionState?.user?.id;
+    if (!codexSessionState || loadedUserId !== currentUsageUserId()) {
+      refreshCodexSessions({ quiet: true });
+    }
+  }
+}
+
+function renderCodexTabs() {
+  const overviewSelected = codexActiveTab === "overview";
+  const overviewTab = $("#codexOverviewTab");
+  const sessionsTab = $("#codexSessionsTab");
+  const overviewPanel = $("#codexOverviewPanel");
+  const sessionsPanel = $("#codexSessionsPanel");
+  if (!overviewTab || !sessionsTab || !overviewPanel || !sessionsPanel) return;
+  overviewTab.setAttribute("aria-selected", overviewSelected ? "true" : "false");
+  sessionsTab.setAttribute("aria-selected", overviewSelected ? "false" : "true");
+  overviewTab.tabIndex = overviewSelected ? 0 : -1;
+  sessionsTab.tabIndex = overviewSelected ? -1 : 0;
+  overviewPanel.hidden = !overviewSelected;
+  sessionsPanel.hidden = overviewSelected;
+  $(".token-panel").dataset.activeTab = codexActiveTab;
+}
+
+function handleCodexTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === "ArrowLeft" || event.key === "Home" ? "overview" : "sessions";
+  setCodexTab(next, { focus: true });
+}
+
+function handleCodexSessionBreakpoint() {
+  codexSessionPage = 1;
+  renderCodexSessionManager();
+  if (codexActiveTab === "sessions") refreshCodexSessions({ quiet: true });
+}
+
 function usageUsers() {
   return Array.isArray(state?.config?.usageUsers) ? state.config.usageUsers : [];
 }
@@ -171,11 +239,14 @@ function getUsageUserById(id) {
 
 function selectUsageUser(userId) {
   if (!usageUsers().some((user) => user.id === userId)) return;
+  codexSessionAbortController?.abort();
   selectedUsageUserId = userId;
   localStorage.setItem("gpt-monitor-usage-user", selectedUsageUserId);
   codexUsageMonth = "";
   codexSessionMonth = "all";
-  codexSessionVisible = 30;
+  codexSessionPage = 1;
+  codexSessionState = null;
+  codexSessionError = "";
   refreshCodexUsage({ quiet: true });
 }
 
@@ -225,6 +296,9 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
       }
     );
     renderCodexUsage();
+    if (codexActiveTab === "sessions" && (force || codexSessionState?.user?.id !== userId)) {
+      await refreshCodexSessions({ quiet: true });
+    }
     if (!quiet) showToast(codexUsageState.message || "Token 数据已同步");
   } catch (error) {
     codexUsageState = {
@@ -239,6 +313,50 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
     if (button) {
       button.disabled = false;
       button.classList.remove("spinning");
+    }
+  }
+}
+
+async function refreshCodexSessions({ quiet = false, scroll = false } = {}) {
+  clearTimeout(codexSessionSearchTimer);
+  codexSessionAbortController?.abort();
+  const controller = new AbortController();
+  codexSessionAbortController = controller;
+  codexSessionLoading = true;
+  codexSessionError = "";
+  renderCodexSessionManager();
+
+  const params = new URLSearchParams({
+    userId: currentUsageUserId(),
+    q: codexSessionQuery,
+    month: codexSessionMonth,
+    sort: codexSessionSort,
+    page: String(codexSessionPage),
+    pageSize: String(preferredCodexSessionPageSize())
+  });
+
+  try {
+    const result = await api(`/api/codex-usage/sessions?${params.toString()}`, {
+      signal: controller.signal
+    });
+    if (controller !== codexSessionAbortController) return;
+    codexSessionState = result;
+    codexSessionPage = Number(result.pagination?.page) || 1;
+    codexSessionMonth = result.query?.month || codexSessionMonth;
+    codexSessionSort = result.query?.sort || codexSessionSort;
+    if (!quiet) showToast("会话数据已加载");
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    codexSessionError = error.message;
+    if (!quiet) showToast(error.message);
+  } finally {
+    if (controller === codexSessionAbortController) {
+      codexSessionLoading = false;
+      renderCodexSessionManager();
+      syncIcons();
+      if (scroll) {
+        $("#codexSessionsPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     }
   }
 }
@@ -258,6 +376,7 @@ async function generateCodexUsageReport() {
       body: JSON.stringify({ userId: currentUsageUserId() })
     });
     if (result.status !== "ok") throw new Error(result.message || "报告生成失败");
+    codexSessionState = null;
     await refreshCodexUsage({ quiet: true });
     if (reportWindow) reportWindow.location.href = appUrl(result.reportUrl);
     else window.location.href = appUrl(result.reportUrl);
@@ -320,6 +439,7 @@ function renderWindow(prefix, window) {
 
 function renderCodexUsage() {
   renderUsageUserSelect();
+  renderCodexTabs();
   const select = $("#codexMonthSelect");
   const status = codexUsageState?.status || "loading";
   const report = codexUsageState?.report || null;
@@ -337,7 +457,7 @@ function renderCodexUsage() {
     $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexTopSessions").innerHTML = `<div class="empty-state">${escapeHtml(codexUsageState?.message || "等待 Token 数据")}</div>`;
     $("#codexSessionCount").textContent = "默认收起";
-    renderCodexSessionManager(null);
+    renderCodexSessionManager();
     return;
   }
 
@@ -367,7 +487,7 @@ function renderCodexUsage() {
   const sessions = selectedView?.top_sessions || report.top_sessions || [];
   $("#codexSessionCount").textContent = `${sessions.length} 个 · 默认收起`;
   $("#codexTopSessions").innerHTML = renderCodexSessions(sessions);
-  renderCodexSessionManager(report);
+  renderCodexSessionManager();
 }
 
 function renderUsageUserSelect() {
@@ -626,35 +746,45 @@ function renderCodexSessions(sessions) {
   }).join("");
 }
 
-function renderCodexSessionManager(report) {
-  const sessions = Array.isArray(report?.sessions) ? report.sessions : [];
+function renderCodexSessionManager() {
   const search = $("#codexSessionSearch");
   const monthSelect = $("#codexSessionMonthFilter");
   const sortSelect = $("#codexSessionSort");
-  search.value = codexSessionQuery;
+  const status = $("#codexSessionStatus");
+  const list = $("#codexSessionList");
+  const pagination = codexSessionState?.pagination || {};
+  const items = Array.isArray(codexSessionState?.items) ? codexSessionState.items : [];
+  if (document.activeElement !== search) search.value = codexSessionQuery;
   sortSelect.value = codexSessionSort;
-  renderCodexSessionMonthOptions(monthSelect, sessions);
+  renderCodexSessionMonthOptions(monthSelect, codexSessionState?.months || []);
+  list.setAttribute("aria-busy", codexSessionLoading ? "true" : "false");
+  monthSelect.disabled = codexSessionLoading && !codexSessionState;
+  sortSelect.disabled = codexSessionLoading && !codexSessionState;
 
-  if (!sessions.length) {
+  if (!codexSessionState) {
     $("#codexSessionSummary").innerHTML = "";
-    $("#codexSessionList").innerHTML = `<div class="empty-state">暂无可管理的会话明细</div>`;
-    $("#codexSessionMoreButton").hidden = true;
+    list.innerHTML = `<div class="empty-state${codexSessionLoading ? " is-loading" : ""}">${escapeHtml(
+      codexSessionLoading ? "正在载入会话…" : (codexSessionError || "打开会话标签后加载明细")
+    )}</div>`;
+    status.textContent = codexSessionLoading ? "正在加载分页会话" : (codexSessionError || "尚未加载会话");
+    renderCodexSessionPagination({ page: 1, totalPages: 1, totalItems: 0 });
     return;
   }
 
-  const filtered = sortCodexSessions(filterCodexSessions(sessions));
-  const visible = filtered.slice(0, codexSessionVisible);
-  $("#codexSessionSummary").innerHTML = renderCodexSessionSummary(filtered, sessions.length);
-  $("#codexSessionList").innerHTML = visible.length
-    ? visible.map(renderCodexManagedSession).join("")
+  $("#codexSessionSummary").innerHTML = renderCodexSessionSummary(
+    codexSessionState.summary,
+    pagination.totalItems
+  );
+  list.innerHTML = items.length
+    ? items.map(renderCodexManagedSession).join("")
     : `<div class="empty-state">没有匹配的会话</div>`;
-  const moreButton = $("#codexSessionMoreButton");
-  moreButton.hidden = filtered.length <= visible.length;
-  moreButton.textContent = `显示更多 · ${visible.length}/${filtered.length}`;
+  status.textContent = codexSessionLoading
+    ? "正在更新会话列表"
+    : codexSessionError || `${formatInteger(pagination.totalItems || 0)} 个匹配会话 · 每页 ${formatInteger(pagination.pageSize || preferredCodexSessionPageSize())} 条`;
+  renderCodexSessionPagination(pagination);
 }
 
-function renderCodexSessionMonthOptions(select, sessions) {
-  const months = [...new Set(sessions.map((session) => session.month).filter(Boolean))].sort().reverse();
+function renderCodexSessionMonthOptions(select, months) {
   if (codexSessionMonth !== "all" && !months.includes(codexSessionMonth)) {
     codexSessionMonth = "all";
   }
@@ -667,54 +797,27 @@ function renderCodexSessionMonthOptions(select, sessions) {
   ].join("");
 }
 
-function filterCodexSessions(sessions) {
-  const query = codexSessionQuery.trim().toLowerCase();
-  return sessions.filter((session) => {
-    if (codexSessionMonth !== "all" && session.month !== codexSessionMonth) return false;
-    if (!query) return true;
-    const text = [
-      session.title,
-      session.id,
-      session.cwd,
-      session.model,
-      session.provider,
-      session.source,
-      session.day,
-      session.month
-    ].filter(Boolean).join(" ").toLowerCase();
-    return text.includes(query);
-  });
+function renderCodexSessionPagination(value) {
+  const page = Number(value?.page) || 1;
+  const totalPages = Number(value?.totalPages) || 1;
+  const totalItems = Number(value?.totalItems) || 0;
+  $("#codexSessionPrevButton").disabled = codexSessionLoading || page <= 1;
+  $("#codexSessionNextButton").disabled = codexSessionLoading || page >= totalPages || totalItems === 0;
+  $("#codexSessionPageInfo").textContent = `${totalItems ? `第 ${formatInteger(page)} / ${formatInteger(totalPages)} 页` : "暂无结果"} · ${formatInteger(totalItems)} 条`;
 }
 
-function sortCodexSessions(sessions) {
-  const sorted = sessions.slice();
-  const dateValue = (session, key) => {
-    const date = new Date(session[key] || "");
-    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
-  };
-  sorted.sort((left, right) => {
-    if (codexSessionSort === "cost_desc") {
-      return sessionCostValue(right) - sessionCostValue(left) || Number(right.tokens || 0) - Number(left.tokens || 0);
-    }
-    if (codexSessionSort === "updated_desc") {
-      return dateValue(right, "updated_at") - dateValue(left, "updated_at") || Number(right.tokens || 0) - Number(left.tokens || 0);
-    }
-    if (codexSessionSort === "created_desc") {
-      return dateValue(right, "created_at") - dateValue(left, "created_at") || Number(right.tokens || 0) - Number(left.tokens || 0);
-    }
-    return Number(right.tokens || 0) - Number(left.tokens || 0);
-  });
-  return sorted;
-}
-
-function renderCodexSessionSummary(sessions, totalCount) {
-  const usage = sessions.reduce((sum, session) => addUsageSplitClient(sum, session.usage_split), createEmptyUsageSplit());
-  const cost = sumSessionCosts(sessions);
+function renderCodexSessionSummary(summary, totalCount) {
+  const usage = summary?.usage_split || {};
+  const cost = summary?.cost_estimate;
+  const costDisplay = cost ? formatUsdRange(cost.low_usd, cost.high_usd) : "--";
+  const costNote = cost
+    ? `${formatCompactTokens(cost.priced_tokens)} 已计价 Token`
+    : "暂无费用估算";
   return `
-    ${sessionSummaryItem("匹配会话", `${formatInteger(sessions.length)} / ${formatInteger(totalCount)}`, "可按标题、ID、目录搜索")}
+    ${sessionSummaryItem("匹配会话", formatInteger(totalCount || 0), "汇总覆盖全部匹配结果")}
     ${sessionSummaryItem("总 Token", formatCompactTokens(usage.total_tokens), `入 ${formatCompactTokens(usage.input_tokens)} · 出 ${formatCompactTokens(usage.output_tokens)}`)}
     ${sessionSummaryItem("缓存输入", formatCompactTokens(usage.cached_input_tokens), "已包含在输入 Token 中")}
-    ${sessionSummaryItem("总费用", cost.display, cost.note)}
+    ${sessionSummaryItem("总费用", costDisplay, costNote)}
   `;
 }
 
@@ -735,23 +838,36 @@ function renderCodexManagedSession(session) {
   const date = session.updated_at || session.created_at;
   const dateLabel = date ? formatFullDateTime(date) : (session.updated || session.created || session.day || "--");
   const usage = session.usage_split || {};
-  const cost = session.cost_estimate?.range_display || "--";
+  const cost = session.cost_estimate?.range_display || (session.cost_estimate
+    ? formatUsdRange(session.cost_estimate.low_usd, session.cost_estimate.high_usd)
+    : "--");
   const requests = Number(session.requests) > 0 ? ` · ${formatInteger(session.requests)} 请求` : "";
   const duration = Number(session.duration_ms) > 0 ? ` · ${formatDurationMs(session.duration_ms)}` : "";
+  const detailsOpen = CODEX_SESSION_MOBILE.matches ? "" : " open";
   return `
     <article class="managed-session">
       <div class="managed-session-main">
         <strong title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
-        <span>${escapeHtml(shortSessionId(id))} · ${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")} · ${escapeHtml(dateLabel)}${escapeHtml(requests)}${escapeHtml(duration)}</span>
-        ${session.cwd ? `<small title="${escapeAttr(session.cwd)}">${escapeHtml(session.cwd)}</small>` : ""}
+        <span>${escapeHtml(dateLabel)}</span>
       </div>
-      <div class="managed-session-metrics" aria-label="Token 与费用">
+      <div class="managed-session-key-metrics" aria-label="会话总量与费用">
         ${sessionMetric("总", session.tokens_display || formatCompactTokens(session.tokens))}
-        ${sessionMetric("入", formatCompactTokens(usage.input_tokens))}
-        ${sessionMetric("缓", formatCompactTokens(usage.cached_input_tokens))}
-        ${sessionMetric("出", formatCompactTokens(usage.output_tokens))}
         ${sessionMetric("费用", cost)}
       </div>
+      <details class="managed-session-details"${detailsOpen}>
+        <summary>Token 与来源详情</summary>
+        <div class="managed-session-details-body">
+          <div class="managed-session-context">
+            <span>${escapeHtml(shortSessionId(id))} · ${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")}${escapeHtml(requests)}${escapeHtml(duration)}</span>
+            ${session.cwd ? `<small title="${escapeAttr(session.cwd)}">${escapeHtml(session.cwd)}</small>` : ""}
+          </div>
+          <div class="managed-session-metrics" aria-label="Token 拆分">
+            ${sessionMetric("输入", formatCompactTokens(usage.input_tokens))}
+            ${sessionMetric("缓存", formatCompactTokens(usage.cached_input_tokens))}
+            ${sessionMetric("输出", formatCompactTokens(usage.output_tokens))}
+          </div>
+        </div>
+      </details>
     </article>
   `;
 }
@@ -763,46 +879,6 @@ function sessionMetric(label, value) {
       <strong>${escapeHtml(value || "--")}</strong>
     </span>
   `;
-}
-
-function createEmptyUsageSplit() {
-  return {
-    input_tokens: 0,
-    cached_input_tokens: 0,
-    output_tokens: 0,
-    reasoning_output_tokens: 0,
-    total_tokens: 0
-  };
-}
-
-function addUsageSplitClient(target, source) {
-  const usage = source || {};
-  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]) {
-    target[key] += Number(usage[key]) || 0;
-  }
-  return target;
-}
-
-function sumSessionCosts(sessions) {
-  let low = 0;
-  let high = 0;
-  let priced = 0;
-  for (const session of sessions) {
-    const estimate = session.cost_estimate;
-    if (!estimate) continue;
-    low += Number(estimate.low_usd) || 0;
-    high += Number(estimate.high_usd) || 0;
-    priced += Number(estimate.priced_tokens) || 0;
-  }
-  return {
-    display: priced ? formatUsdRange(low, high) : "--",
-    note: priced ? `${formatCompactTokens(priced)} 已计价 Token` : "暂无费用估算"
-  };
-}
-
-function sessionCostValue(session) {
-  const estimate = session.cost_estimate || {};
-  return Number(estimate.midpoint_usd ?? estimate.high_usd ?? estimate.low_usd) || 0;
 }
 
 function shortSessionId(value) {
@@ -1291,10 +1367,12 @@ async function uploadCodexDb() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     codexUsageState = payload;
+    codexSessionState = null;
     state = await api("/api/state");
     syncSelectedUsageUserFromState();
     render();
     fillSettingsForm(state.config);
+    if (codexActiveTab === "sessions") await refreshCodexSessions({ quiet: true });
     showToast("SQLite 已上传并刷新");
   } catch (error) {
     showToast(error.message);
@@ -1329,10 +1407,12 @@ async function saveSub2ApiKey() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     codexUsageState = payload;
+    codexSessionState = null;
     state = await api("/api/state");
     syncSelectedUsageUserFromState();
     render();
     fillSettingsForm(state.config);
+    if (codexActiveTab === "sessions") await refreshCodexSessions({ quiet: true });
     showToast("Sub2API Key 已保存并刷新");
   } catch (error) {
     showToast(error.message);

@@ -8,7 +8,7 @@
 - 同步历史的日 / 周 / 月视图切换，支持上一天 / 周 / 月与下一天 / 周 / 月
 - 历史状态点按时间排列，悬浮状态点可查看 5H 与 WEEK 的具体柱状数据
 - 下方历史列表默认只显示 3 条，可手动展开
-- Codex Token 会话管理，支持列出、搜索所有本机会话，并查看输入 / 缓存输入 / 输出 Token 与费用估算
+- Codex Token 会话管理，支持分页搜索所有本机会话，并查看输入 / 缓存输入 / 输出 Token 与费用估算
 - 多用户用量数据管理：账号与额度仍共用同一个 ChatGPT/Codex 登录，消耗仪表盘和会话管理按数据用户切换
 - 当前订阅套餐类型展示在标题区域
 - 默认只监听 `127.0.0.1`，公网模式需要访问密钥
@@ -139,13 +139,15 @@ output/codex-usage/<用户ID>/latest.html
 
 该目录已被 `.gitignore` 排除，不会进入公开仓库。
 
-费用估算使用 OpenAI API Pricing 的标准输入 / 缓存输入 / 输出 token 价格。`state_5.sqlite` 仍只提供 `threads.tokens_used` 总量，面板会额外读取本机 rollout JSONL 里的 `token_count.total_token_usage`，优先按输入、缓存输入和输出拆分计算；拆分缺失时才回退到总 token 区间估算。该估算不是 OpenAI 账单，未计入 Batch、Regional、长上下文或工具费用差异。高消耗会话默认收起，底部会话管理可以搜索标题、ID、目录、模型和来源。
+费用估算使用 OpenAI API Pricing 的标准输入 / 缓存输入 / 输出 token 价格。`state_5.sqlite` 仍只提供 `threads.tokens_used` 总量，面板会额外读取本机 rollout JSONL 里的 `token_count.total_token_usage`，优先按输入、缓存输入和输出拆分计算；拆分缺失时才回退到总 token 区间估算。该估算不是 OpenAI 账单，未计入 Batch、Regional、长上下文或工具费用差异。“消耗仪表盘”分为“概览 / 会话”两个标签；会话标签按需加载，支持标题、ID、目录、模型和来源搜索以及服务端分页。
 
 页面上方的账号、额度和 5 小时 / 每周窗口仍来自同一个 ChatGPT/Codex 登录；只有“消耗仪表盘”和“会话管理”会按数据用户切换。默认数据用户是 `Gurara`，旧的全局 Codex SQLite 与 Sub2API 配置会自动迁移到这个用户。其他用户可以在设置中新增，再分别上传 SQLite 和保存 Sub2API API key。
 
 Sub2API 按数据用户配置 API key，默认 Gurara 兼容旧的 `data/sub2api.key`。保存 key 后会写入 `data/users/<用户ID>/sub2api.key`，并调用 `/v1/usage` 合并按天 / 模型统计。如果额外配置 `SUB2API_ADMIN_EMAIL` 和 `SUB2API_ADMIN_PASSWORD`，面板会登录 Sub2API 后台并把 `/admin/usage` 的请求级明细加入会话管理；未配置后台账号时，会退回展示按天 / 模型聚合的 Sub2API 统计行。
 
 消耗仪表盘和会话管理使用本地缓存：进入网页时只读取 `data/users/<用户ID>/codex-usage-cache.json`，不会自动重新统计 SQLite 或重新拉取 Sub2API。后台服务每 6 小时检查并刷新一次过期缓存；点击刷新、上传 SQLite、保存 API key 或生成报告也会重建当前用户缓存。
+
+概览接口 `/api/codex-usage` 不返回完整会话数组；会话明细通过 `/api/codex-usage/sessions` 获取，支持 `userId`、`q`、`month`、`sort`、`page` 和 `pageSize` 参数，其中单页最多 50 条。`/api/export` 仍保留完整同步历史。
 
 ## 端点探测
 
@@ -162,6 +164,7 @@ npm run probe:endpoints
 服务启动后运行：
 
 ```powershell
+npm test
 npm run smoke
 ```
 
