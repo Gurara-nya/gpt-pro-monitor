@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { scanFile } = require("../device-agent");
+const { AGENT_VERSION, agentMetadata, retryDelayMs, scanFile, systemdQuote } = require("../device-agent");
 
 function row(type, payload, timestamp = "2026-07-14T00:00:00Z") {
   return JSON.stringify({ type, timestamp, payload });
@@ -51,4 +51,15 @@ test("device agent keeps the filename thread ID for forked rollout history", asy
   const result = await scanFile(file);
   assert.equal(result.cursor.threadId, "current-thread");
   assert.equal(result.events[0].threadHash, require("node:crypto").createHash("sha256").update("current-thread").digest("hex"));
+});
+
+test("device agent exposes install metadata and bounded retry delays", () => {
+  assert.equal(AGENT_VERSION, "2.0.0");
+  assert.equal(agentMetadata().version, AGENT_VERSION);
+  assert.equal(typeof agentMetadata().platform, "string");
+  assert.equal(retryDelayMs(1), 60_000);
+  assert.equal(retryDelayMs(2), 300_000);
+  assert.equal(retryDelayMs(3), 900_000);
+  assert.equal(retryDelayMs(99), 900_000);
+  assert.equal(systemdQuote('/tmp/a "b"'), '"/tmp/a \\"b\\""');
 });

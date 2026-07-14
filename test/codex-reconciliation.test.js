@@ -6,7 +6,8 @@ const {
   aggregateSplitCost,
   capTelemetryEvents,
   codexUsageSplitCoverage,
-  deviceBreakdownForPeriod
+  deviceBreakdownForPeriod,
+  mergeDeviceState
 } = require("../server");
 
 function usage(input, output, cached = 0, reasoning = 0) {
@@ -112,4 +113,27 @@ test("device breakdown uses the selected month denominator and monthly coverage"
   assert.deepEqual(july.map((item) => item.cost_share_percent), [33.33, 66.67]);
   assert.deepEqual(july.map((item) => item.coverage_percent), [100, 75]);
   assert.equal(july[1].period_month, "2026-07");
+});
+
+test("live registration state overrides stale fields from the cached usage report", () => {
+  const merged = mergeDeviceState({
+    id: "remote",
+    name: "Laptop",
+    lastSeenAt: "2026-07-14T09:12:00.000Z",
+    agentVersion: "2.0.0",
+    agentPlatform: "linux",
+    agentInstalled: true
+  }, {
+    id: "remote",
+    name: "Old name",
+    lastSeenAt: null,
+    agentVersion: "",
+    agentPlatform: "",
+    agentInstalled: false,
+    total_tokens: 123
+  });
+  assert.equal(merged.total_tokens, 123);
+  assert.equal(merged.name, "Laptop");
+  assert.equal(merged.agentVersion, "2.0.0");
+  assert.equal(merged.agentInstalled, true);
 });

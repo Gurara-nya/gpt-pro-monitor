@@ -13,6 +13,7 @@ function authHeaders() {
 
 async function request(path, options) {
   const response = await fetch(`${baseUrl}${path}`, {
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       ...authHeaders()
@@ -80,14 +81,46 @@ async function main() {
       body: JSON.stringify({ userId, name: `smoke-${Date.now()}` })
     });
     assert.equal(typeof smokeDevice.token, "string");
+    assert.match(smokeDevice.commands.windows, /--install/);
+    assert.match(smokeDevice.commands.unix, /--install/);
+    assert.match(smokeDevice.commands.manual, /--install/);
+    const agentDownload = await fetch(
+      `${baseUrl}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`,
+      { headers: { Authorization: `Bearer ${smokeDevice.token}` } }
+    );
+    assert.equal(agentDownload.ok, true, `authenticated agent download returned ${agentDownload.status}`);
+    assert.equal(agentDownload.headers.get("x-gpt-monitor-agent-version"), "2.0.0");
+    assert.match(await agentDownload.text(), /AGENT_VERSION = "2\.0\.0"/);
+    const aliasAgentDownload = await fetch(
+      `${new URL(baseUrl).origin}/monitor/api/device-agent/v1?userId=${encodeURIComponent(userId)}`,
+      { cache: "no-store", headers: { Authorization: `Bearer ${smokeDevice.token}` } }
+    );
+    assert.equal(aliasAgentDownload.ok, true, `subpath agent download returned ${aliasAgentDownload.status}`);
+    assert.equal(aliasAgentDownload.headers.get("x-gpt-monitor-agent-version"), "2.0.0");
+    const rejectedDownload = await fetch(`${baseUrl}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`);
+    assert.equal(rejectedDownload.status, 401);
     const ingestResponse = await fetch(`${baseUrl}/api/device-ingest/v1`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${smokeDevice.token}` },
-      body: JSON.stringify({ schemaVersion: 1, userId, batchId: `smoke-${Date.now()}`, cursor: "smoke", events: [], snapshots: [] })
+      body: JSON.stringify({
+        schemaVersion: 1,
+        userId,
+        batchId: `smoke-${Date.now()}`,
+        cursor: "smoke",
+        events: [],
+        snapshots: [],
+        agent: { version: "2.0.0", platform: "linux", nodeVersion: "v22.17.0", installed: true }
+      })
     });
     assert.equal(ingestResponse.ok, true, `device ingest returned ${ingestResponse.status}`);
     const ingest = await ingestResponse.json();
     assert.equal(ingest.accepted, 0);
+    assert.equal(typeof ingest.serverTime, "string");
+    const devicesAfterIngest = await request(`/api/devices?userId=${encodeURIComponent(userId)}&_=${Date.now()}`);
+    const ingestedDevice = devicesAfterIngest.devices.find((device) => device.id === smokeDevice.device.id);
+    assert.equal(ingestedDevice.agentVersion, "2.0.0");
+    assert.equal(ingestedDevice.agentPlatform, "linux");
+    assert.equal(ingestedDevice.agentInstalled, true);
     const exportWithDevice = await request("/api/export");
     assert.equal(JSON.stringify(exportWithDevice).includes(smokeDevice.token), false);
   } finally {
@@ -105,7 +138,7 @@ async function main() {
 
   const helpResponse = await fetch(`${baseUrl}/help`, { headers: authHeaders() });
   assert.equal(helpResponse.ok, true, `/help returned ${helpResponse.status}`);
-  assert.match(await helpResponse.text(), /远程设备接入/);
+  assert.match(await helpResponse.text(), /data-page="device-help"/);
   const agentResponse = await fetch(`${baseUrl}/downloads/device-agent.js`, { headers: authHeaders() });
   assert.equal(agentResponse.ok, true, `/downloads/device-agent.js returned ${agentResponse.status}`);
   assert.match(agentResponse.headers.get("content-disposition") || "", /device-agent\.js/);
@@ -117,7 +150,7 @@ async function main() {
   assert.match(await aliasResponse.text(), /GPT Pro Monitor/);
   const aliasHelpResponse = await fetch(`${origin}/monitor/help`, { headers: authHeaders() });
   assert.equal(aliasHelpResponse.ok, true, `/monitor/help returned ${aliasHelpResponse.status}`);
-  assert.match(await aliasHelpResponse.text(), /远程设备接入/);
+  assert.match(await aliasHelpResponse.text(), /data-page="device-help"/);
 
   if (accessSecret) {
     const unauthorized = await fetch(`${baseUrl}/api/state`);

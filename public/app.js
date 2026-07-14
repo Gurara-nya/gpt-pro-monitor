@@ -52,6 +52,11 @@ let codexActiveTab = localStorage.getItem("gpt-monitor-codex-tab") === "sessions
 let selectedUsageUserId = localStorage.getItem("gpt-monitor-usage-user") || "";
 let selectedDeviceId = localStorage.getItem("gpt-monitor-device") || "all";
 let deviceSettingsState = [];
+let deviceOnboardingCommands = null;
+let deviceOnboardingDeviceId = "";
+let deviceOnboardingTokenCreatedAt = "";
+let deviceOnboardingPlatform = /windows/i.test(navigator.userAgent) ? "windows" : "unix";
+let deviceOnboardingPollTimer = null;
 let settingsUsageUserId = "";
 let toastTimer = null;
 let historyViewMode = "week";
@@ -125,6 +130,17 @@ function wireEvents() {
   $("#addUsageUserButton").addEventListener("click", addUsageUser);
   $("#addPricingOverrideButton").addEventListener("click", () => appendPricingOverrideRow());
   $("#createDeviceButton").addEventListener("click", createDevice);
+  $("#newDeviceName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      createDevice();
+    }
+  });
+  $("#copyDeviceCommandButton").addEventListener("click", copyDeviceCommand);
+  $("#closeDeviceCommandButton").addEventListener("click", hideDeviceCommand);
+  for (const button of $$('[data-device-platform]')) {
+    button.addEventListener("click", () => selectDeviceOnboardingPlatform(button.dataset.devicePlatform));
+  }
   $("#codexDbUploadButton").addEventListener("click", uploadCodexDb);
   $("#sub2ApiKeySaveButton").addEventListener("click", saveSub2ApiKey);
   $("#clearButton").addEventListener("click", clearHistory);
@@ -139,6 +155,7 @@ function wireEvents() {
 
 async function api(path, options = {}) {
   const response = await fetch(appUrl(path), {
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {})
@@ -1292,29 +1309,37 @@ function openSettings() {
 
 function closeSettings() {
   $("#settingsDialog").close();
-  $("#deviceCommandOutput").value = "";
-  $("#deviceCommandField").hidden = true;
+  hideDeviceCommand();
 }
 
 async function refreshDeviceSettings() {
   try {
-    const result = await api(`/api/devices?userId=${encodeURIComponent(settingsUsageUserId || currentUsageUserId())}`);
+    const result = await api(`/api/devices?userId=${encodeURIComponent(settingsUsageUserId || currentUsageUserId())}&_=${Date.now()}`);
     deviceSettingsState = result.devices || [];
     renderDeviceSettings();
+    return deviceSettingsState;
   } catch (error) {
     $("#deviceSettingsList").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    return [];
   }
 }
 
 function renderDeviceSettings() {
   const list = $("#deviceSettingsList");
   list.innerHTML = deviceSettingsState.length ? deviceSettingsState.map((device) => `
-    <article class="device-settings-row" data-device-id="${escapeAttr(device.id)}">
-      <div><strong>${escapeHtml(device.name || device.id)}</strong><span>${device.builtIn ? "内置本机" : device.revoked ? "已吊销" : device.stale ? "数据过期" : "远端设备"} · ${device.lastSeenAt ? escapeHtml(formatFullDateTime(device.lastSeenAt)) : "尚未同步"}</span></div>
-      <span>${escapeHtml(formatCompactTokens(device.total_tokens))} Token</span>
+    <article class="device-settings-row ${device.stale ? "is-stale" : ""}" data-device-id="${escapeAttr(device.id)}">
+      <div class="device-settings-summary">
+        <div><strong>${escapeHtml(device.name || device.id)}</strong><span class="device-state ${escapeAttr(deviceState(device).className)}">${escapeHtml(deviceState(device).label)}</span></div>
+        <span>${escapeHtml(device.builtIn ? "本机数据自动读取" : device.lastSeenAt ? `${relativeDeviceTime(device.lastSeenAt)}同步 · ${formatFullDateTime(device.lastSeenAt)}` : "等待首次同步")}</span>
+      </div>
+      <dl class="device-settings-meta">
+        <div><dt>Token</dt><dd>${escapeHtml(formatCompactTokens(device.total_tokens))}</dd></div>
+        <div><dt>采集器</dt><dd>${escapeHtml(device.builtIn ? "内置" : device.agentVersion ? `v${device.agentVersion} · ${platformLabel(device.agentPlatform)}` : "--")}</dd></div>
+        <div><dt>运行方式</dt><dd>${escapeHtml(device.builtIn ? "服务端" : device.agentInstalled ? "自动运行" : device.lastSeenAt ? "手动运行" : "--")}</dd></div>
+      </dl>
       <div class="device-settings-actions">
         <button class="text-button" type="button" data-device-action="rename">改名</button>
-        ${device.builtIn ? "" : `<button class="text-button" type="button" data-device-action="rotate">轮换令牌</button><button class="text-button" type="button" data-device-action="toggle">${device.enabled && !device.revoked ? "吊销" : "启用"}</button>`}
+        ${device.builtIn ? "" : `<button class="text-button" type="button" data-device-action="sync">同步命令</button><button class="text-button" type="button" data-device-action="rotate">重新接入</button><button class="text-button" type="button" data-device-action="toggle">${device.enabled && !device.revoked ? "停用" : "启用"}</button><button class="text-button danger" type="button" data-device-action="remove">删除</button>`}
       </div>
     </article>
   `).join("") : `<div class="empty-state">暂无设备</div>`;
@@ -1326,17 +1351,23 @@ function renderDeviceSettings() {
 async function createDevice() {
   const name = $("#newDeviceName").value.trim();
   if (!name) return showToast("请输入设备名称");
+  const button = $("#createDeviceButton");
+  button.disabled = true;
+  button.textContent = "正在创建…";
   try {
     const result = await api("/api/devices", {
       method: "POST",
       body: JSON.stringify({ userId: settingsUsageUserId || currentUsageUserId(), name })
     });
-    showDeviceCommand(result.command);
+    showDeviceCommand(result);
     $("#newDeviceName").value = "";
     await refreshDeviceSettings();
-    showToast("设备已创建；令牌只显示这一次");
+    showToast("设备已创建，请在新设备运行安装命令");
   } catch (error) {
     showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "添加设备";
   }
 }
 
@@ -1351,17 +1382,32 @@ async function manageDevice(deviceId, action) {
         method: "PATCH",
         body: JSON.stringify({ userId, name: name.trim() })
       });
+    } else if (action === "sync") {
+      const command = device?.agentPlatform === "win32"
+        ? `node "$HOME\\.gpt-monitor\\device-agent.js" --once`
+        : `node "$HOME/.gpt-monitor/device-agent.js" --once`;
+      await copyText(command);
+      showToast("手动同步命令已复制");
+      return;
     } else if (action === "rotate") {
+      if (device?.lastSeenAt && !confirm(`重新接入“${device.name || deviceId}”会让旧命令立即失效，是否继续？`)) return;
       const result = await api(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, {
         method: "POST",
         body: JSON.stringify({ userId })
       });
-      showDeviceCommand(result.command);
-      showToast("令牌已轮换；旧令牌立即失效");
+      showDeviceCommand(result);
+      showToast("已生成新的接入命令；旧令牌已失效");
     } else if (action === "toggle") {
+      if (device?.enabled && !device?.revoked && !confirm(`停用“${device.name || deviceId}”后将拒绝它继续上传，是否继续？`)) return;
       await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
         method: "PATCH",
         body: JSON.stringify({ userId, enabled: !(device?.enabled && !device?.revoked) })
+      });
+    } else if (action === "remove") {
+      if (!confirm(`删除“${device?.name || deviceId}”的设备登记？已接收的统计数据会保留。`)) return;
+      await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ userId })
       });
     }
     await refreshDeviceSettings();
@@ -1370,11 +1416,102 @@ async function manageDevice(deviceId, action) {
   }
 }
 
-function showDeviceCommand(command) {
-  $("#deviceCommandOutput").value = command || "";
+function deviceState(device) {
+  if (device.builtIn) return { label: "本机", className: "local" };
+  if (device.revoked || !device.enabled) return { label: "已停用", className: "disabled" };
+  if (!device.lastSeenAt) return { label: "待接入", className: "pending" };
+  if (device.stale) return { label: "同步中断", className: "stale" };
+  return { label: "同步正常", className: "online" };
+}
+
+function platformLabel(platform) {
+  return ({ win32: "Windows", linux: "Linux", darwin: "macOS" })[platform] || platform || "未知系统";
+}
+
+function relativeDeviceTime(value) {
+  const elapsed = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(elapsed) || elapsed < 0) return "刚刚";
+  const minutes = Math.floor(elapsed / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function showDeviceCommand(result) {
+  deviceOnboardingCommands = result.commands || { manual: result.command || "" };
+  deviceOnboardingDeviceId = result.device?.id || "";
+  deviceOnboardingTokenCreatedAt = result.device?.tokenCreatedAt || new Date().toISOString();
   $("#deviceCommandField").hidden = false;
-  $("#deviceCommandOutput").focus();
-  $("#deviceCommandOutput").select();
+  $("#deviceOnboardingTitle").textContent = `${result.device?.name || "新设备"} · 一键安装`;
+  $("#deviceOnboardingBadge").textContent = "等待安装";
+  $("#deviceOnboardingStatus").textContent = "尚未检测到新设备，运行命令后会自动确认";
+  selectDeviceOnboardingPlatform(deviceOnboardingPlatform);
+  startDeviceOnboardingPoll();
+  $("#copyDeviceCommandButton").focus();
+}
+
+function selectDeviceOnboardingPlatform(platform) {
+  deviceOnboardingPlatform = platform || "manual";
+  for (const button of $$('[data-device-platform]')) {
+    const selected = button.dataset.devicePlatform === deviceOnboardingPlatform;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+  $("#deviceCommandOutput").value = deviceOnboardingCommands?.[deviceOnboardingPlatform] || deviceOnboardingCommands?.manual || "";
+}
+
+async function copyText(value) {
+  const text = String(value || "");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const output = $("#deviceCommandOutput");
+    const previous = output.value;
+    output.value = text;
+    output.select();
+    document.execCommand("copy");
+    output.value = previous;
+  }
+}
+
+async function copyDeviceCommand() {
+  const command = $("#deviceCommandOutput").value;
+  if (!command) return;
+  await copyText(command);
+  $("#copyDeviceCommandButton").textContent = "已复制，去新设备运行";
+  setTimeout(() => { $("#copyDeviceCommandButton").textContent = "复制安装命令"; }, 2200);
+}
+
+function hideDeviceCommand() {
+  clearTimeout(deviceOnboardingPollTimer);
+  deviceOnboardingPollTimer = null;
+  deviceOnboardingCommands = null;
+  deviceOnboardingDeviceId = "";
+  deviceOnboardingTokenCreatedAt = "";
+  $("#deviceCommandOutput").value = "";
+  $("#deviceCommandField").hidden = true;
+}
+
+function startDeviceOnboardingPoll() {
+  clearTimeout(deviceOnboardingPollTimer);
+  const poll = async () => {
+    if (!deviceOnboardingDeviceId || $("#deviceCommandField").hidden) return;
+    const devices = await refreshDeviceSettings();
+    const device = devices.find((item) => item.id === deviceOnboardingDeviceId);
+    const syncedAfterToken = device?.lastSeenAt && new Date(device.lastSeenAt) >= new Date(deviceOnboardingTokenCreatedAt);
+    if (syncedAfterToken) {
+      $("#deviceOnboardingBadge").textContent = "接入成功";
+      $("#deviceOnboardingStatus").textContent = `首次同步完成 · ${relativeDeviceTime(device.lastSeenAt)}`;
+      showToast(`${device.name || "新设备"}已开始自动同步`);
+      refreshCodexUsage({ quiet: true });
+      return;
+    }
+    $("#deviceOnboardingStatus").textContent = "正在等待新设备，运行命令后通常数秒内上线";
+    deviceOnboardingPollTimer = setTimeout(poll, 5000);
+  };
+  deviceOnboardingPollTimer = setTimeout(poll, 2500);
 }
 
 function fillSettingsForm(config) {

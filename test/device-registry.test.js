@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { DeviceRegistry, normalizeIngestBatch } = require("../lib/device-registry");
+const { DeviceRegistry, normalizeAgent, normalizeIngestBatch } = require("../lib/device-registry");
 
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 
@@ -22,8 +22,8 @@ function event(id, thread = "thread", total = 10, at = "2026-07-14T00:00:00.000Z
   };
 }
 
-function batch(id, events, cursor = id) {
-  return { schemaVersion: 1, batchId: id, cursor, events, snapshots: [] };
+function batch(id, events, cursor = id, agent) {
+  return { schemaVersion: 1, batchId: id, cursor, events, snapshots: [], agent };
 }
 
 async function registryFixture(t) {
@@ -47,9 +47,20 @@ test("ingest is batch-idempotent and globally deduplicates copied rollouts", asy
   const first = await registry.create("Laptop");
   const second = await registry.create("Desktop");
   const copied = event("copied");
-  assert.deepEqual(await registry.ingest(first.token, batch("a", [copied])), {
-    accepted: 1, duplicates: 0, cursor: "a", replay: false
-  });
+  const ingested = await registry.ingest(first.token, batch("a", [copied], "a", {
+    version: "2.0.0", platform: "win32", nodeVersion: "v22.17.0", installed: true
+  }));
+  assert.equal(ingested.accepted, 1);
+  assert.equal(ingested.duplicates, 0);
+  assert.equal(ingested.cursor, "a");
+  assert.equal(ingested.replay, false);
+  assert.match(ingested.serverTime, /^\d{4}-\d{2}-\d{2}T/);
+  const registered = (await registry.list()).find((device) => device.id === "laptop");
+  assert.equal(registered.agentVersion, "2.0.0");
+  assert.equal(registered.agentPlatform, "win32");
+  assert.equal(registered.agentNodeVersion, "v22.17.0");
+  assert.equal(registered.agentInstalled, true);
+  assert.equal(registered.lastAccepted, 1);
   assert.equal((await registry.ingest(first.token, batch("a", [copied]))).replay, true);
   const duplicate = await registry.ingest(second.token, batch("b", [copied]));
   assert.equal(duplicate.accepted, 0);
@@ -82,4 +93,12 @@ test("invalid and over-limit payloads are rejected", () => {
   assert.throws(() => normalizeIngestBatch({ schemaVersion: 2, events: [] }), /Unsupported/);
   assert.throws(() => normalizeIngestBatch({ schemaVersion: 1, events: Array.from({ length: 501 }, (_, i) => event(String(i))) }), /at most 500/);
   assert.throws(() => normalizeIngestBatch({ schemaVersion: 1, events: [{ prompt: "secret" }] }), /invalid event/);
+});
+
+test("agent metadata is normalized without accepting arbitrary fields", () => {
+  assert.deepEqual(normalizeAgent({
+    version: " 2.0.0 ", platform: "WIN32", nodeVersion: "v22.17.0", installed: 1, secret: "no"
+  }), {
+    version: "2.0.0", platform: "win32", nodeVersion: "v22.17.0", installed: true
+  });
 });

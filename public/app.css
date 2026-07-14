@@ -1822,34 +1822,257 @@ dialog::backdrop {
   width: 100%;
 }
 
-.device-settings-list {
-  display: grid;
-  gap: 8px;
+.device-settings-heading,
+.device-settings-heading > div,
+.device-onboarding-head,
+.device-onboarding-head > div,
+.device-settings-summary,
+.device-settings-summary > div,
+.device-settings-actions,
+.device-onboarding-actions {
+  display: flex;
+  align-items: center;
 }
 
-.device-settings-row {
+.device-settings-heading {
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--line);
+  gap: 16px;
+  margin-bottom: 14px;
 }
 
-.device-settings-row > div:first-child {
-  min-width: 0;
+.device-settings-heading > div {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.device-settings-heading h3,
+.device-settings-heading small {
+  margin: 0;
+}
+
+.device-settings-heading small,
+.device-privacy-note,
+.device-onboarding > small,
+.device-onboarding-actions span,
+.device-settings-summary > span {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.device-settings-heading .text-button {
+  flex: 0 0 auto;
+  text-decoration: none;
+}
+
+.device-create-row {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
 }
 
-.device-settings-actions {
-  gap: 6px;
+.device-create-row .filled-button {
+  min-width: 128px;
+}
+
+.device-onboarding {
+  display: grid;
+  gap: 16px;
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.device-onboarding[hidden] {
+  display: none;
+}
+
+.device-onboarding-head {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.device-onboarding-head > div {
+  min-width: 0;
+  gap: 10px;
+}
+
+.device-onboarding-head strong {
+  overflow-wrap: anywhere;
+}
+
+.device-onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  padding: 1px;
+  list-style-position: inside;
+  background: var(--line);
+}
+
+.device-onboarding-steps li {
+  min-width: 0;
+  padding: 12px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.device-platform-tabs {
+  display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  gap: 6px;
+}
+
+.device-platform-tabs button {
+  min-height: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.device-platform-tabs button[aria-selected="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--canvas);
+}
+
+.device-command-label {
+  letter-spacing: 0.06em;
 }
 
 #deviceCommandOutput {
   width: 100%;
   resize: vertical;
   overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  background: #020202;
+  color: var(--ink);
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.device-onboarding-actions {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.device-onboarding-actions span {
+  text-align: right;
+}
+
+.device-settings-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.device-settings-row {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.2fr) minmax(280px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.device-settings-row.is-stale {
+  border-style: dashed;
+}
+
+.device-settings-summary {
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.device-settings-summary > div {
+  min-width: 0;
+  gap: 8px;
+}
+
+.device-settings-summary strong,
+.device-settings-summary span {
+  overflow-wrap: anywhere;
+}
+
+.device-state {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.device-state.online,
+.device-state.local {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.device-state.pending,
+.device-state.stale,
+.device-state.disabled {
+  border-style: dashed;
+}
+
+.device-settings-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.device-settings-meta div {
+  min-width: 0;
+}
+
+.device-settings-meta dt {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.device-settings-meta dd {
+  overflow-wrap: anywhere;
+  margin: 5px 0 0;
+  font-size: 0.74rem;
+}
+
+.device-settings-actions {
+  max-width: 250px;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.device-settings-actions .text-button {
+  min-height: 36px;
+  padding: 0 10px;
+}
+
+.device-settings-actions .danger {
+  border-style: dashed;
+}
+
+.device-privacy-note {
+  display: block;
+  margin-top: 12px;
 }
 
 label {
@@ -1955,6 +2178,17 @@ input[type="color"] {
 }
 
 @media (max-width: 900px) {
+  .device-settings-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .device-settings-actions {
+    width: 100%;
+    max-width: none;
+    justify-content: flex-start;
+  }
+
   .device-breakdown-row {
     grid-template-columns: 1fr 1fr;
   }
@@ -2058,9 +2292,34 @@ input[type="color"] {
 
 @media (max-width: 560px) {
   .device-breakdown-head,
-  .device-settings-row {
+  .device-settings-heading,
+  .device-onboarding-head,
+  .device-onboarding-actions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .device-create-row,
+  .device-onboarding-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .device-create-row .filled-button,
+  .device-settings-heading .text-button,
+  .device-onboarding-actions .filled-button {
+    width: 100%;
+  }
+
+  .device-onboarding-actions span {
+    text-align: left;
+  }
+
+  .device-settings-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .device-settings-actions .text-button {
+    min-height: var(--tap);
   }
 
   .device-breakdown-row {
@@ -2070,10 +2329,6 @@ input[type="color"] {
   .device-breakdown-row dl {
     grid-column: auto;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .device-settings-actions {
-    justify-content: flex-start;
   }
 
   .app-shell {

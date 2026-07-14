@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>远程设备接入 · GPT Pro Monitor</title>
+    <title>新设备接入 · GPT Pro Monitor</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="app.css" />
     <link rel="stylesheet" href="help.css" />
     <script src="help.js" defer></script>
   </head>
-  <body>
+  <body data-page="device-help">
     <div class="app-shell help-shell">
       <header class="topbar help-topbar">
         <div class="brand">
@@ -18,127 +18,109 @@
             <p>Remote telemetry</p>
             <div class="brand-meta">
               <span class="user-badge">GPT Pro Monitor</span>
-              <span class="status-badge success">帮助</span>
+              <span class="status-badge success">接入帮助</span>
             </div>
           </div>
         </div>
         <div class="topbar-actions">
-          <a class="text-button" href="./">返回监控</a>
-          <a class="filled-button" href="downloads/device-agent.js" download>下载采集器</a>
+          <a class="filled-button" href="./">返回 Monitor</a>
         </div>
       </header>
 
       <main class="help-main">
         <section class="help-hero">
-          <p>Multi-device onboarding</p>
-          <h1>远程设备接入</h1>
-          <p class="help-lead">每台电脑使用独立设备令牌，只上传模型、时间和 Token 遥测。推荐使用采集器持续增量同步；SQLite 上传适合一次性快照。</p>
+          <p>One-command onboarding</p>
+          <h1>三步接入，一条命令</h1>
+          <p class="help-lead">管理员在 Monitor 创建设备，远程用户复制并运行对应系统的一条命令。安装、首次同步和自启动会自动完成。</p>
           <dl class="help-facts">
             <div><dt>当前 Monitor</dt><dd id="currentMonitorUrl">--</dd></div>
-            <div><dt>默认同步</dt><dd>每 15 分钟</dd></div>
-            <div><dt>过期判定</dt><dd>45 分钟未同步</dd></div>
+            <div><dt>自动同步</dt><dd>每 15 分钟</dd></div>
+            <div><dt>离线提示</dt><dd>45 分钟未同步</dd></div>
           </dl>
-          <p class="callout warning transport-warning" id="transportWarning" hidden>当前公网入口使用 HTTP。Basic Auth 和设备令牌会以明文经过公网；完成 HTTPS 配置前，请勿向远程用户下发接入命令。</p>
+          <p class="callout warning transport-warning" id="transportWarning" hidden>当前公网入口不是 HTTPS，请先完成 HTTPS 配置，再向远程用户发送包含设备令牌的接入命令。</p>
         </section>
 
         <nav class="help-nav" aria-label="帮助目录">
-          <a href="#agent">持续采集</a>
-          <a href="#autostart">自动运行</a>
-          <a href="#sqlite">SQLite 快照</a>
-          <a href="#privacy">上传内容</a>
-          <a href="#troubleshooting">故障排查</a>
+          <a href="#quick">快速接入</a>
+          <a href="#daily">日常操作</a>
+          <a href="#privacy">数据边界</a>
+          <a href="#troubleshooting">排障</a>
         </nav>
 
-        <section class="help-section" id="agent">
-          <div class="help-section-title"><span>01</span><div><p>Recommended</p><h2>使用设备采集器持续上传</h2></div></div>
-          <ol class="step-list">
-            <li><strong>管理员创建设备</strong><p>在 Monitor 打开“设置 → 远端设备采集”，输入设备名称并点击“创建设备”。</p></li>
-            <li><strong>立即保存一次性命令</strong><p>设备令牌只显示一次。每台设备单独创建，不要多人共用同一个令牌。</p></li>
-            <li><strong>在远程电脑准备环境</strong><p>安装 Node.js 22 或更高版本，并用实际运行 Codex、拥有 <code>~/.codex</code> 数据的系统用户操作。</p></li>
-            <li><strong>下载并执行</strong><p>下载本页提供的 <code>device-agent.js</code>，在其所在目录运行管理员提供的完整命令。首次可追加 <code>--once</code> 做连通测试。</p></li>
+        <section class="help-section" id="quick">
+          <div class="help-section-title"><span>01</span><div><p>Quick start</p><h2>新设备快速接入</h2></div></div>
+          <ol class="quick-flow">
+            <li><span>1</span><div><strong>管理员创建设备</strong><p>进入 Monitor 的“设置 → 远程设备采集”，填写易识别的设备名称，点击“添加设备”。</p></div></li>
+            <li><span>2</span><div><strong>远程用户运行一条命令</strong><p>选择 Windows 或 Linux / macOS，复制命令并在远程电脑运行。需要提前安装 Node.js 22 或更高版本。</p></div></li>
+            <li><span>3</span><div><strong>等待在线确认</strong><p>首次历史较多时需要几分钟。设置面板会自动等待并显示“首次同步成功”，之后无需人工操作。</p></div></li>
           </ol>
 
-          <div class="command-card">
-            <div><span>命令结构示例</span><button type="button" data-copy-target="agentCommand">复制</button></div>
-            <pre id="agentCommand"><code>node device-agent.js --url "MONITOR_URL" --user "数据用户ID" --device "设备ID" --token "一次性令牌" --once</code></pre>
+          <div class="result-strip" aria-label="命令自动完成的操作">
+            <span>下载采集器</span><span>保存安全配置</span><span>首次同步</span><span>配置自启动</span>
           </div>
-          <p class="callout">测试成功会看到 <code>accepted=...</code>、<code>duplicates=...</code> 和 <code>scanned=...</code>。之后执行 <code>node device-agent.js</code> 即可保持每 15 分钟同步；配置和游标保存在 <code>~/.gpt-monitor/</code>。</p>
-
-          <h3>非默认 Codex 目录</h3>
-          <div class="command-card compact">
-            <div><span>指定数据目录</span><button type="button" data-copy-target="customHomeCommand">复制</button></div>
-            <pre id="customHomeCommand"><code>node device-agent.js --codex-home "/实际路径/.codex" --once</code></pre>
-          </div>
+          <p class="callout"><strong>接入命令只显示一次。</strong>命令中包含该设备的专用令牌，请直接发给对应设备的使用者，不要发到群聊或公开工单。遗失时在设备卡片点“重新接入”即可生成新令牌，旧令牌会立即失效。</p>
         </section>
 
-        <section class="help-section" id="autostart">
-          <div class="help-section-title"><span>02</span><div><p>Operations</p><h2>让采集器自动运行</h2></div></div>
-          <p>首次带令牌命令运行成功后，令牌已经保存在当前用户目录。自启动命令不需要再次写入令牌。</p>
-          <div class="platform-grid">
+        <section class="help-section" id="daily">
+          <div class="help-section-title"><span>02</span><div><p>Daily operations</p><h2>安装后通常无需操作</h2></div></div>
+          <div class="operation-grid">
             <article>
-              <h3>Linux · systemd</h3>
-              <p>服务用户必须与运行 Codex 的用户相同。</p>
-              <div class="command-card compact">
-                <div><span><code>/etc/systemd/system/gpt-monitor-agent.service</code></span><button type="button" data-copy-target="systemdUnit">复制</button></div>
-                <pre id="systemdUnit"><code>[Unit]
-Description=GPT Monitor Device Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=你的Codex系统用户
-WorkingDirectory=/opt/gpt-monitor-agent
-ExecStart=/usr/bin/node /opt/gpt-monitor-agent/device-agent.js
-Restart=always
-RestartSec=15
-
-[Install]
-WantedBy=multi-user.target</code></pre>
-              </div>
-              <pre><code>sudo systemctl daemon-reload
-sudo systemctl enable --now gpt-monitor-agent
-sudo systemctl status gpt-monitor-agent</code></pre>
+              <span class="operation-tag">自动</span>
+              <h3>持续更新</h3>
+              <p>采集器每 15 分钟增量同步；失败后会按 1、5、15 分钟自动重试。首次扫描完整历史，之后只读取新增数据。</p>
             </article>
             <article>
-              <h3>Windows · 任务计划程序</h3>
-              <ol>
-                <li>选择“登录时”触发。</li>
-                <li>程序填写 <code>node.exe</code>。</li>
-                <li>参数填写采集器绝对路径，例如 <code>C:\GPT-Monitor-Agent\device-agent.js</code>。</li>
-                <li>“起始于”填写采集器目录，并使用保存过令牌的同一 Windows 用户。</li>
-              </ol>
+              <span class="operation-tag">检查</span>
+              <h3>查看本机状态</h3>
+              <p>不会显示设备令牌。</p>
+              <div class="mini-command"><code id="statusCommand">node "$HOME/.gpt-monitor/device-agent.js" --status</code><button type="button" data-copy-target="statusCommand">复制</button></div>
+            </article>
+            <article>
+              <span class="operation-tag">立即</span>
+              <h3>手动同步一次</h3>
+              <p>无需等待下一次自动同步。</p>
+              <div class="mini-command"><code id="syncCommand">node "$HOME/.gpt-monitor/device-agent.js" --once</code><button type="button" data-copy-target="syncCommand">复制</button></div>
+            </article>
+            <article>
+              <span class="operation-tag">移除</span>
+              <h3>卸载自启动</h3>
+              <p>保留本地配置；追加 <code>--purge</code> 可同时删除配置与游标。</p>
+              <div class="mini-command"><code id="uninstallCommand">node "$HOME/.gpt-monitor/device-agent.js" --uninstall</code><button type="button" data-copy-target="uninstallCommand">复制</button></div>
             </article>
           </div>
-        </section>
 
-        <section class="help-section" id="sqlite">
-          <div class="help-section-title"><span>03</span><div><p>Snapshot</p><h2>手动上传 SQLite 快照</h2></div></div>
-          <ol class="step-list">
-            <li><strong>找到数据库</strong><p>默认文件为 <code>~/.codex/state_5.sqlite</code>，也可能由 Codex 配置中的 <code>sqlite_home</code> 指定。</p></li>
-            <li><strong>打开用户数据设置</strong><p>在 Monitor 进入“设置 → 用户数据”，先选择正确的数据用户。</p></li>
-            <li><strong>上传并刷新</strong><p>在“上传 SQLite”选择数据库，点击“上传并刷新”。</p></li>
-          </ol>
-          <p class="callout warning">SQLite 上传会更新所选数据用户的完整快照来源，不会作为一台独立设备参与占比。多设备持续统计请使用设备采集器。</p>
+          <details class="help-details">
+            <summary>特殊目录、Linux 注销后运行和手动方式</summary>
+            <div class="details-body">
+              <h3>Codex 数据不在默认目录</h3>
+              <p>在首次接入命令末尾增加 <code>--codex-home "/实际路径/.codex"</code>。必须使用实际运行 Codex 的同一系统用户执行。</p>
+              <h3>Linux 用户退出后也要继续同步</h3>
+              <p>采集器默认安装为当前用户的 systemd 服务。如果服务器未开启用户 linger，可由管理员运行：</p>
+              <div class="mini-command"><code id="lingerCommand">sudo loginctl enable-linger "$USER"</code><button type="button" data-copy-target="lingerCommand">复制</button></div>
+              <h3>只做一次 SQLite 快照</h3>
+              <p>可在“设置 → 用户数据”上传 <code>~/.codex/state_5.sqlite</code>。它适合临时快照，但不会作为独立设备参与设备占比；长期统计请使用采集器。</p>
+              <p><a href="downloads/device-agent.js" download>下载采集器源码</a>仅用于审查或完全手动安装，常规接入不需要先下载文件。</p>
+            </div>
+          </details>
         </section>
 
         <section class="help-section" id="privacy">
-          <div class="help-section-title"><span>04</span><div><p>Privacy boundary</p><h2>采集器上传什么</h2></div></div>
+          <div class="help-section-title"><span>03</span><div><p>Privacy boundary</p><h2>只同步用量，不同步内容</h2></div></div>
           <div class="privacy-grid">
-            <article><h3>会上传</h3><ul><li>设备 ID</li><li>不可逆线程哈希和事件哈希</li><li>事件时间、模型、提供方</li><li>输入、缓存输入、输出、推理输出 Token</li><li>SQLite 线程总量快照</li></ul></article>
-            <article><h3>不会上传</h3><ul><li>提示词和回复正文</li><li>代码内容</li><li>会话标题</li><li>工作目录和文件路径</li><li>浏览器登录密码或 Monitor Basic Auth</li></ul></article>
+            <article><h3>会上传</h3><ul><li>设备 ID、采集器版本、操作系统和同步状态</li><li>不可逆线程哈希与事件哈希</li><li>事件时间、模型和提供方</li><li>输入、缓存输入、输出、推理输出 Token</li><li>SQLite 线程 Token 总量快照</li></ul></article>
+            <article><h3>不会上传</h3><ul><li>提示词和回复正文</li><li>代码内容</li><li>会话标题</li><li>工作目录和文件路径</li><li>Monitor 登录密码或浏览器凭据</li></ul></article>
           </div>
         </section>
 
         <section class="help-section" id="troubleshooting">
-          <div class="help-section-title"><span>05</span><div><p>Diagnostics</p><h2>常见问题</h2></div></div>
-          <dl class="trouble-list">
-            <div><dt><code>401</code> 或令牌无效</dt><dd>令牌可能输入错误、已轮换或已吊销。管理员应为该设备轮换令牌，再运行新的接入命令。</dd></div>
-            <div><dt>设备显示“数据过期”</dt><dd>采集器超过 45 分钟没有成功同步。检查进程、自启动状态、HTTPS 地址和服务器网络。</dd></div>
-            <div><dt>首次同步时间很长</dt><dd>首次会流式扫描全部历史并分批上传，属于正常现象；后续只读取新增文件内容。</dd></div>
-            <div><dt>找不到 SQLite</dt><dd>使用运行 Codex 的同一系统用户，或通过 <code>--codex-home</code> 指定正确目录。</dd></div>
-            <div><dt>重复 Token</dt><dd>服务端按设备无关事件 ID 幂等去重；复制到其他设备的同一 rollout 不会重复计量。</dd></div>
-          </dl>
+          <div class="help-section-title"><span>04</span><div><p>Diagnostics</p><h2>遇到问题先看这里</h2></div></div>
+          <div class="trouble-list">
+            <details><summary>提示需要 Node.js 22</summary><p>在远程电脑安装 Node.js 22 或更高版本，关闭并重新打开终端，再运行原接入命令。用 <code>node --version</code> 可检查版本。</p></details>
+            <details><summary>设备一直显示“等待首次同步”</summary><p>确认命令在运行 Codex 的同一系统用户下执行，并检查远程电脑能否访问上方的 Monitor 地址。首次历史较多时请等待几分钟。</p></details>
+            <details><summary>设备显示“数据过期”</summary><p>在远程电脑运行上面的“查看本机状态”和“手动同步一次”。若返回 401，请在 Monitor 对该设备执行“重新接入”，再运行新命令。</p></details>
+            <details><summary>更换电脑或令牌泄露</summary><p>在设备卡片点击“重新接入”。新命令生成后旧令牌立即失效；在新电脑运行新命令即可。</p></details>
+            <details><summary>重复复制了同一份 Codex 历史</summary><p>服务端会按与设备无关的事件 ID 幂等去重，同一个 rollout 出现在多台设备时不会重复计量。</p></details>
+          </div>
         </section>
       </main>
 

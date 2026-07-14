@@ -11,4 +11,6 @@ logs/
 *.local
 *.tmp
 *.log
+__pycache__/
+*.pyc
 sub2api_daily*.csv

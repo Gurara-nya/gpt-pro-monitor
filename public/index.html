@@ -323,20 +323,46 @@
           </section>
 
           <section>
-            <h3>远端设备采集</h3>
-            <div class="form-grid">
-              <label>
-                <span>新设备名称</span>
-                <input id="newDeviceName" autocomplete="off" placeholder="Laptop" />
-              </label>
-              <button class="text-button" id="createDeviceButton" type="button">创建设备</button>
-              <div class="device-settings-list wide" id="deviceSettingsList"></div>
-              <label class="wide" id="deviceCommandField" hidden>
-                <span>一次性接入命令（请立即保存）</span>
-                <textarea id="deviceCommandOutput" rows="4" readonly></textarea>
-              </label>
-              <small class="wide">采集端只上传不可逆线程哈希、事件哈希、时间、模型和 Token，不上传标题、目录、提示词、回复或代码。默认每 15 分钟同步。</small>
+            <div class="device-settings-heading">
+              <div><h3>远端设备</h3><small>输入名称后，把生成的一条命令发到新设备运行即可。</small></div>
+              <a class="text-button" href="help" target="_blank" rel="noopener">接入帮助</a>
             </div>
+            <div class="device-create-row">
+              <label>
+                <span>设备名称</span>
+                <input id="newDeviceName" autocomplete="off" placeholder="例如：办公室电脑" maxlength="120" />
+              </label>
+              <button class="filled-button" id="createDeviceButton" type="button">添加设备</button>
+            </div>
+
+            <div class="device-onboarding" id="deviceCommandField" hidden>
+              <div class="device-onboarding-head">
+                <div><span class="status-badge success" id="deviceOnboardingBadge">等待安装</span><strong id="deviceOnboardingTitle">在新设备运行一条命令</strong></div>
+                <button class="icon-button quiet" id="closeDeviceCommandButton" type="button" aria-label="关闭接入命令">×</button>
+              </div>
+              <ol class="device-onboarding-steps">
+                <li>新设备先安装 <strong>Node.js 22+</strong></li>
+                <li>选择系统，复制并运行下面的命令</li>
+                <li>页面会自动等待并确认首次同步</li>
+              </ol>
+              <div class="device-platform-tabs" role="tablist" aria-label="选择新设备系统">
+                <button type="button" role="tab" data-device-platform="windows">Windows</button>
+                <button type="button" role="tab" data-device-platform="unix">Linux / macOS</button>
+                <button type="button" role="tab" data-device-platform="manual">已下载采集器</button>
+              </div>
+              <label class="device-command-label">
+                <span>一次性安装命令</span>
+                <textarea id="deviceCommandOutput" rows="5" readonly spellcheck="false"></textarea>
+              </label>
+              <div class="device-onboarding-actions">
+                <button class="filled-button" id="copyDeviceCommandButton" type="button">复制安装命令</button>
+                <span id="deviceOnboardingStatus" role="status" aria-live="polite">尚未检测到新设备</span>
+              </div>
+              <small>命令会完成下载、首次导入和自动运行配置。设备令牌只显示在本次命令中。</small>
+            </div>
+
+            <div class="device-settings-list" id="deviceSettingsList"></div>
+            <small class="device-privacy-note">只上传哈希化线程标识、时间、模型、平台版本和 Token；不上传标题、目录、提示词、回复或代码。</small>
           </section>
 
           <section>

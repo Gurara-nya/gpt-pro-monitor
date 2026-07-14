@@ -13,11 +13,6 @@ if (transportWarning && window.location.protocol !== "https:" && !isLocalHost) {
   transportWarning.hidden = false;
 }
 
-const commandNode = document.querySelector("#agentCommand code");
-if (commandNode) {
-  commandNode.textContent = `node device-agent.js --url "${monitorUrl}" --user "数据用户ID" --device "设备ID" --token "一次性令牌" --once`;
-}
-
 let copyTimer = null;
 for (const button of document.querySelectorAll("[data-copy-target]")) {
   button.addEventListener("click", async () => {
@@ -25,12 +20,26 @@ for (const button of document.querySelectorAll("[data-copy-target]")) {
     const text = target?.textContent?.trim() || "";
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       showCopyStatus("已复制");
     } catch {
       showCopyStatus("复制失败，请手动选择命令");
     }
   });
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("copy failed");
 }
 
 function showCopyStatus(message) {

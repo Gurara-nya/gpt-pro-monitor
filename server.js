@@ -3600,10 +3600,12 @@ async function serveStatic(req, res, pathname) {
 async function serveDeviceAgent(req, res) {
   try {
     const body = await readFile(DEVICE_AGENT_FILE);
+    const version = body.toString("utf8").match(/const AGENT_VERSION = "([^"]+)"/)?.[1] || "unknown";
     res.writeHead(200, {
       "Content-Type": "text/javascript; charset=utf-8",
       "Content-Disposition": 'attachment; filename="device-agent.js"',
       "Cache-Control": "no-cache",
+      "X-GPT-Monitor-Agent-Version": version,
       "Content-Length": body.length
     });
     if (req.method === "HEAD") res.end();
@@ -3712,9 +3714,33 @@ function monitorPublicUrl(req) {
   return requestOrigin(req) || `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 }
 
-function deviceAgentCommand(req, userId, deviceId, token) {
+function powershellLiteral(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function shellLiteral(value) {
+  return `'${String(value || "").replace(/'/g, `'"'"'`)}'`;
+}
+
+function deviceAgentCommands(req, userId, deviceId, token) {
   const url = `${monitorPublicUrl(req)}${getBasePath()}`.replace(/\/+$/, "");
-  return `node device-agent.js --url ${JSON.stringify(url)} --user ${JSON.stringify(userId)} --device ${JSON.stringify(deviceId)} --token ${JSON.stringify(token)}`;
+  const downloadUrl = `${url}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`;
+  const args = `--url ${JSON.stringify(url)} --user ${JSON.stringify(userId)} --device ${JSON.stringify(deviceId)} --token ${JSON.stringify(token)} --install`;
+  const powershell = [
+    `$p=Join-Path $env:TEMP 'gpt-monitor-agent.js'`,
+    `Invoke-WebRequest -UseBasicParsing -Uri ${powershellLiteral(downloadUrl)} -Headers @{Authorization=${powershellLiteral(`Bearer ${token}`)}} -OutFile $p`,
+    `node $p ${args}`
+  ].join("; ");
+  const unix = [
+    `p=\"\${TMPDIR:-/tmp}/gpt-monitor-agent.js\"`,
+    `curl -fsSL -H ${shellLiteral(`Authorization: Bearer ${token}`)} ${shellLiteral(downloadUrl)} -o \"$p\"`,
+    `node \"$p\" --url ${shellLiteral(url)} --user ${shellLiteral(userId)} --device ${shellLiteral(deviceId)} --token ${shellLiteral(token)} --install`
+  ].join(" && ");
+  return {
+    windows: powershell,
+    unix,
+    manual: `node device-agent.js ${args}`
+  };
 }
 
 async function listDeviceState(userId) {
@@ -3722,7 +3748,13 @@ async function listDeviceState(userId) {
   const devices = await registry.list();
   const usage = await getCodexUsageState({ userId });
   const breakdown = new Map((usage.report?.device_breakdown || []).map((item) => [item.id, item]));
-  return devices.map((device) => ({ ...device, ...(breakdown.get(device.id) || {}) }));
+  return devices.map((device) => mergeDeviceState(device, breakdown.get(device.id)));
+}
+
+function mergeDeviceState(device, cachedBreakdown) {
+  // Usage totals may come from a cached report, but registration and freshness
+  // fields must always reflect the live manifest after the latest ingest.
+  return { ...(cachedBreakdown || {}), ...device };
 }
 
 async function handleDeviceIngest(req, res) {
@@ -3736,6 +3768,16 @@ async function handleDeviceIngest(req, res) {
     queueCodexUsageRefresh(userId, "device-ingest");
   }
   return sendJson(res, 200, result);
+}
+
+async function handleDeviceAgentDownload(req, res, url) {
+  const token = deviceBearerToken(req);
+  if (!token) throw Object.assign(new Error("Device Bearer token is required"), { statusCode: 401 });
+  const userId = cleanId(url.searchParams.get("userId") || DEFAULT_USAGE_USER_ID, "user");
+  if (!await deviceRegistry(userId).authenticate(token)) {
+    throw Object.assign(new Error("Invalid or revoked device token"), { statusCode: 401 });
+  }
+  return serveDeviceAgent(req, res);
 }
 
 async function handleApi(req, res, url) {
@@ -3779,9 +3821,11 @@ async function handleApi(req, res, url) {
     const body = await parseBody(req);
     const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
     const created = await deviceRegistry(userId).create(body.name);
+    const commands = deviceAgentCommands(req, userId, created.device.id, created.token);
     return sendJson(res, 201, {
       ...created,
-      command: deviceAgentCommand(req, userId, created.device.id, created.token)
+      command: commands.manual,
+      commands
     });
   }
   const devicePatchMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
@@ -3800,9 +3844,11 @@ async function handleApi(req, res, url) {
     const body = await parseBody(req);
     const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
     const rotated = await deviceRegistry(userId).rotate(deviceRotateMatch[1]);
+    const commands = deviceAgentCommands(req, userId, rotated.device.id, rotated.token);
     return sendJson(res, 200, {
       ...rotated,
-      command: deviceAgentCommand(req, userId, rotated.device.id, rotated.token)
+      command: commands.manual,
+      commands
     });
   }
   if (req.method === "GET" && url.pathname === "/api/export") {
@@ -3846,6 +3892,10 @@ function createServer() {
       const ingestPath = stripBasePath(url.pathname);
       if (req.method === "POST" && ingestPath === "/api/device-ingest/v1") {
         await handleDeviceIngest(req, res);
+        return;
+      }
+      if ((req.method === "GET" || req.method === "HEAD") && ingestPath === "/api/device-agent/v1") {
+        await handleDeviceAgentDownload(req, res, url);
         return;
       }
       if (!isAuthorized(req)) {
@@ -3960,5 +4010,6 @@ module.exports = {
   runProbe,
   fetchCodexUsage,
   getCodexUsageState,
-  generateCodexUsageHtmlReport
+  generateCodexUsageHtmlReport,
+  mergeDeviceState
 };
