@@ -8,6 +8,7 @@ const { existsSync, statSync } = require("node:fs");
 const { mkdir, readFile, readdir, rename, writeFile } = require("node:fs/promises");
 const { promisify } = require("node:util");
 const { querySessions } = require("./lib/session-query");
+const { usageWindows, withUsageWindows } = require("./lib/quota-windows");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
@@ -464,7 +465,7 @@ function normalizeCheck(check) {
     account: normalizeAccount(check.account),
     allowed: check.allowed === undefined ? null : Boolean(check.allowed),
     limitReached: check.limitReached === undefined ? null : Boolean(check.limitReached),
-    usage: check.usage && typeof check.usage === "object" ? check.usage : null,
+    usage: check.usage && typeof check.usage === "object" ? withUsageWindows(check.usage) : null,
     detail: check.detail && typeof check.detail === "object" ? check.detail : {}
   };
 }
@@ -518,7 +519,10 @@ async function getState() {
 function publicUsageWindow(window) {
   if (!window || typeof window !== "object") return null;
   return {
+    id: cleanString(window.id, "", 80),
+    kind: cleanString(window.kind, "custom", 40),
     label: cleanString(window.label, "", 80),
+    shortLabel: cleanString(window.shortLabel, "", 40),
     usedPercent: toNullableNumber(window.usedPercent),
     remainingPercent: toNullableNumber(window.remainingPercent),
     resetAt: validIsoOrNull(window.resetAt),
@@ -531,10 +535,12 @@ function publicUsageWindow(window) {
 
 function publicUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
+  const normalized = withUsageWindows(usage);
   return {
-    planType: cleanString(usage.planType, "", 80),
-    primaryWindow: publicUsageWindow(usage.primaryWindow),
-    secondaryWindow: publicUsageWindow(usage.secondaryWindow)
+    planType: cleanString(normalized.planType, "", 80),
+    windows: usageWindows(normalized).map(publicUsageWindow),
+    primaryWindow: publicUsageWindow(normalized.primaryWindow),
+    secondaryWindow: publicUsageWindow(normalized.secondaryWindow)
   };
 }
 
@@ -2519,7 +2525,7 @@ function computeStats(config, checks, now = new Date()) {
     successful: checks.filter((check) => check.status === "success").length,
     failed: checks.filter((check) => check.status === "failed" || check.status === "auth_error").length,
     limited: checks.filter((check) => check.status === "quota_limited").length,
-    quota: latest?.usage || null,
+    quota: latest?.usage ? withUsageWindows(latest.usage) : null,
     account: latest?.account || null,
     deltas: computeDeltas(latest?.usage, previous?.usage),
     timeline: checks.slice(-48).map((check) => ({
@@ -2527,7 +2533,14 @@ function computeStats(config, checks, now = new Date()) {
       at: check.at,
       status: check.status,
       primaryRemaining: check.usage?.primaryWindow?.remainingPercent ?? null,
-      secondaryRemaining: check.usage?.secondaryWindow?.remainingPercent ?? null
+      secondaryRemaining: check.usage?.secondaryWindow?.remainingPercent ?? null,
+      windows: usageWindows(check.usage).map((window) => ({
+        id: window.id,
+        kind: window.kind,
+        label: window.label,
+        shortLabel: window.shortLabel,
+        remainingPercent: window.remainingPercent ?? null
+      }))
     }))
   };
 }
@@ -2539,6 +2552,7 @@ function overallStatus(config, latest) {
 }
 
 function computeDeltas(current, previous) {
+  const previousById = new Map(usageWindows(previous).map((window) => [window.id, window]));
   return {
     primaryRemaining: percentDelta(
       current?.primaryWindow?.remainingPercent,
@@ -2547,7 +2561,14 @@ function computeDeltas(current, previous) {
     secondaryRemaining: percentDelta(
       current?.secondaryWindow?.remainingPercent,
       previous?.secondaryWindow?.remainingPercent
-    )
+    ),
+    windows: usageWindows(current).map((window) => ({
+      id: window.id,
+      remaining: percentDelta(
+        window.remainingPercent,
+        previousById.get(window.id)?.remainingPercent
+      )
+    }))
   };
 }
 
@@ -2663,7 +2684,7 @@ async function fetchCodexUsage(config) {
 
   const rateLimit = payload.rate_limit || {};
   const limitReached = Boolean(rateLimit.limit_reached);
-  const usage = {
+  const usage = withUsageWindows({
     planType: payload.plan_type || "",
     allowed: rateLimit.allowed === undefined ? null : Boolean(rateLimit.allowed),
     limitReached,
@@ -2674,7 +2695,7 @@ async function fetchCodexUsage(config) {
       ? payload.additional_rate_limits.map(readAdditionalLimit).filter(Boolean)
       : [],
     credits: readCredits(payload.credits)
-  };
+  });
   const account = normalizeAccount({
     name: auth.profile?.name,
     email: payload.email || auth.profile?.email,

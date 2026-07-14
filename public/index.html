@@ -39,49 +39,7 @@
       </header>
 
       <main>
-        <section class="window-grid" aria-label="核心用量窗口">
-          <article class="window-card" data-window="primary">
-            <div class="window-head">
-              <div>
-                <span>5 hour window</span>
-                <h3 id="primaryRemaining">--</h3>
-              </div>
-              <i data-lucide="timer-reset"></i>
-            </div>
-            <div class="window-meter"><span id="primaryMeter"></span></div>
-            <dl class="window-facts">
-              <div>
-                <dt>Used</dt>
-                <dd id="primaryUsed">--</dd>
-              </div>
-              <div>
-                <dt>Reset</dt>
-                <dd id="primaryReset">--</dd>
-              </div>
-            </dl>
-          </article>
-
-          <article class="window-card" data-window="secondary">
-            <div class="window-head">
-              <div>
-                <span>Weekly window</span>
-                <h3 id="secondaryRemaining">--</h3>
-              </div>
-              <i data-lucide="calendar-clock"></i>
-            </div>
-            <div class="window-meter"><span id="secondaryMeter"></span></div>
-            <dl class="window-facts">
-              <div>
-                <dt>Used</dt>
-                <dd id="secondaryUsed">--</dd>
-              </div>
-              <div>
-                <dt>Reset</dt>
-                <dd id="secondaryReset">--</dd>
-              </div>
-            </dl>
-          </article>
-        </section>
+        <section class="window-grid" id="windowGrid" aria-label="核心用量窗口" aria-live="polite"></section>
 
         <section class="history-panel" aria-label="同步历史">
           <div class="panel-head">

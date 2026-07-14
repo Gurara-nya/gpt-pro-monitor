@@ -424,17 +424,31 @@ function renderHeader() {
 
 function renderWindowCards() {
   const quota = state.computed.quota || {};
-  renderWindow("primary", quota.primaryWindow);
-  renderWindow("secondary", quota.secondaryWindow);
-}
-
-function renderWindow(prefix, window) {
-  const remaining = window?.remainingPercent;
-  const used = window?.usedPercent;
-  $(`#${prefix}Remaining`).textContent = formatPercent(remaining);
-  $(`#${prefix}Meter`).style.width = `${safePercent(remaining)}%`;
-  $(`#${prefix}Used`).textContent = formatPercent(used);
-  $(`#${prefix}Reset`).textContent = window?.resetAfterLabel || formatDateTime(window?.resetAt);
+  const windows = quotaWindows(quota);
+  const grid = $("#windowGrid");
+  grid.dataset.count = String(windows.length);
+  grid.innerHTML = windows.length
+    ? windows.map((window) => {
+      const remaining = safePercent(window.remainingPercent);
+      const icon = window.kind === "weekly" ? "calendar-clock" : "timer-reset";
+      return `
+        <article class="window-card" data-window="${escapeAttr(window.id || window.kind || "custom")}">
+          <div class="window-head">
+            <div>
+              <span>${escapeHtml(window.label || "用量窗口")}</span>
+              <h3>${formatPercent(window.remainingPercent)}</h3>
+            </div>
+            <i data-lucide="${icon}"></i>
+          </div>
+          <div class="window-meter" aria-label="剩余额度 ${formatPercent(window.remainingPercent)}"><span style="width:${remaining}%"></span></div>
+          <dl class="window-facts">
+            <div><dt>Used</dt><dd>${formatPercent(window.usedPercent)}</dd></div>
+            <div><dt>Reset</dt><dd>${escapeHtml(window.resetAfterLabel || formatDateTime(window.resetAt))}</dd></div>
+          </dl>
+        </article>
+      `;
+    }).join("")
+    : `<article class="window-card window-card-empty"><p>等待上游返回额度窗口</p></article>`;
 }
 
 function renderCodexUsage() {
@@ -976,16 +990,12 @@ function renderHistoryBucket(bucket) {
       </div>
     `;
   }
-  const primary = check.usage?.primaryWindow;
-  const secondary = check.usage?.secondaryWindow;
-  const p = safePercent(primary?.remainingPercent);
-  const s = safePercent(secondary?.remainingPercent);
-  const title = `${bucket.label} ${bucket.sublabel} · ${formatFullDateTime(check.at)} · 5H ${formatPercent(p)} · WEEK ${formatPercent(s)}`;
+  const windows = quotaWindows(check.usage);
+  const title = `${bucket.label} ${bucket.sublabel} · ${formatFullDateTime(check.at)} · ${quotaWindowSummary(windows)}`;
   return `
     <button class="history-bucket ${escapeAttr(check.status)}" type="button" aria-label="${escapeAttr(title)}">
-      <span class="bucket-bars">
-        <i class="bar-primary" style="height:${p}%"></i>
-        <i class="bar-secondary" style="height:${s}%"></i>
+      <span class="bucket-bars" style="--window-count:${Math.max(1, windows.length)}">
+        ${windows.map((window, index) => `<i class="bar-window bar-window-${index + 1}" style="height:${safePercent(window.remainingPercent)}%"></i>`).join("")}
       </span>
       <span class="point-dot"></span>
       <span class="bucket-label">${escapeHtml(bucket.label)}</span>
@@ -1020,20 +1030,17 @@ function renderCalendarDay(date, check) {
     return `
       <div class="calendar-day empty">
         <span>${date.getDate()}</span>
-        <i class="calendar-ring empty-ring"></i>
+        <i class="calendar-rings empty-ring"></i>
       </div>
     `;
   }
-  const primary = check.usage?.primaryWindow;
-  const secondary = check.usage?.secondaryWindow;
-  const p = safePercent(primary?.remainingPercent);
-  const s = safePercent(secondary?.remainingPercent);
-  const title = `${formatDateOnly(date)} · ${formatFullDateTime(check.at)} · 5H ${formatPercent(p)} · WEEK ${formatPercent(s)}`;
+  const windows = quotaWindows(check.usage);
+  const title = `${formatDateOnly(date)} · ${formatFullDateTime(check.at)} · ${quotaWindowSummary(windows)}`;
   return `
     <button class="calendar-day has-data ${escapeAttr(check.status)}" type="button" aria-label="${escapeAttr(title)}">
       <span>${date.getDate()}</span>
-      <i class="calendar-ring" style="--primary:${p}; --secondary:${s}">
-        <em></em>
+      <i class="calendar-rings">
+        ${windows.slice(0, 4).map((window, index) => `<em style="--ring-index:${index}; --remaining:${safePercent(window.remainingPercent)}"></em>`).join("")}
       </i>
       ${renderPointTooltip(check)}
     </button>
@@ -1041,16 +1048,14 @@ function renderCalendarDay(date, check) {
 }
 
 function renderPointTooltip(check) {
-  const primary = check.usage?.primaryWindow;
-  const secondary = check.usage?.secondaryWindow;
-  const p = safePercent(primary?.remainingPercent);
-  const s = safePercent(secondary?.remainingPercent);
+  const windows = quotaWindows(check.usage);
   return `
     <span class="point-tooltip" role="presentation">
       <strong>${escapeHtml(formatFullDateTime(check.at))}</strong>
       <small>${escapeHtml(REASON_TEXT[check.reason] || check.reason || "手动")} · ${escapeHtml(STATUS_TEXT[check.status] || check.status)}</small>
-      ${tooltipBar("5H", p, primary)}
-      ${tooltipBar("WEEK", s, secondary)}
+      ${windows.length
+        ? windows.map((window) => tooltipBar(quotaWindowShortLabel(window), safePercent(window.remainingPercent), window)).join("")
+        : `<small>此记录没有额度窗口数据</small>`}
     </span>
   `;
 }
@@ -1079,8 +1084,7 @@ function renderHistoryList(checks) {
 }
 
 function renderHistoryRow(check) {
-  const primary = check.usage?.primaryWindow;
-  const secondary = check.usage?.secondaryWindow;
+  const windows = quotaWindows(check.usage);
   return `
     <article class="history-row ${escapeAttr(check.status)}">
       <div class="history-time">
@@ -1088,8 +1092,9 @@ function renderHistoryRow(check) {
         <span>${escapeHtml(REASON_TEXT[check.reason] || check.reason || "手动")}</span>
       </div>
       <div class="history-values">
-        ${historyValue("5H", primary)}
-        ${historyValue("WEEK", secondary)}
+        ${windows.length
+          ? windows.map((window) => historyValue(quotaWindowShortLabel(window), window)).join("")
+          : `<span class="history-value-empty">无窗口数据</span>`}
       </div>
       <span class="history-state">${escapeHtml(STATUS_TEXT[check.status] || check.status)}</span>
     </article>
@@ -1106,6 +1111,27 @@ function historyValue(label, window) {
       <small>used ${formatPercent(window?.usedPercent)} · reset ${escapeHtml(window?.resetAfterLabel || formatDateTime(window?.resetAt))}</small>
     </span>
   `;
+}
+
+function quotaWindows(usage) {
+  if (!usage || typeof usage !== "object") return [];
+  if (Array.isArray(usage.windows)) return usage.windows.filter(Boolean);
+  return [usage.primaryWindow, usage.secondaryWindow].filter(Boolean).map((window, index) => ({
+    ...window,
+    id: window.id || (index === 0 ? "primary" : "secondary"),
+    kind: window.kind || "custom",
+    label: window.label || window.windowLabel || (index === 0 ? "主窗口" : "次窗口"),
+    shortLabel: window.shortLabel || window.windowLabel || (index === 0 ? "PRIMARY" : "SECONDARY")
+  }));
+}
+
+function quotaWindowShortLabel(window) {
+  return window?.shortLabel || window?.windowLabel || window?.label || "WINDOW";
+}
+
+function quotaWindowSummary(windows) {
+  if (!windows.length) return "无窗口数据";
+  return windows.map((window) => `${quotaWindowShortLabel(window)} ${formatPercent(window.remainingPercent)}`).join(" · ");
 }
 
 function setHistoryView(view) {

@@ -328,6 +328,21 @@ main {
   gap: var(--gap);
 }
 
+.window-grid[data-count="1"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.window-grid[data-count="1"] .window-card {
+  width: 100%;
+}
+
+.window-card-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
 .window-card {
   padding: clamp(20px, 3.2vw, 30px);
   overflow: hidden;
@@ -1166,7 +1181,7 @@ main {
   width: 24px;
   height: 74px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(var(--window-count, 2), minmax(3px, 1fr));
   gap: 4px;
   align-items: end;
 }
@@ -1179,8 +1194,13 @@ main {
   animation: rise 520ms cubic-bezier(.2, .7, .2, 1) both;
 }
 
-.bucket-bars .bar-secondary {
+.bucket-bars .bar-window-2,
+.bucket-bars .bar-window-4 {
   background: rgba(240, 240, 250, 0.42);
+}
+
+.bucket-bars .bar-window-3 {
+  background: rgba(240, 240, 250, 0.66);
 }
 
 .history-bucket.empty .bucket-bars {
@@ -1461,41 +1481,30 @@ main {
   letter-spacing: 0.06em;
 }
 
-.calendar-ring {
-  --primary: 0;
-  --secondary: 0;
+.calendar-rings {
   width: 48px;
   height: 48px;
   position: relative;
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background:
-    conic-gradient(rgba(240, 240, 250, 0.95) calc(var(--primary) * 1%), rgba(240, 240, 250, 0.12) 0);
 }
 
-.calendar-ring::before {
-  content: "";
+.calendar-rings em {
   position: absolute;
-  inset: 6px;
-  border-radius: inherit;
-  background: var(--canvas);
-}
-
-.calendar-ring em {
-  width: 25px;
-  height: 25px;
-  position: relative;
+  inset: calc(var(--ring-index, 0) * 6px);
   display: block;
   border-radius: inherit;
-  background:
-    conic-gradient(rgba(240, 240, 250, 0.46) calc(var(--secondary) * 1%), rgba(240, 240, 250, 0.08) 0);
+  background: conic-gradient(
+    rgba(240, 240, 250, calc(0.95 - var(--ring-index, 0) * 0.14)) calc(var(--remaining) * 1%),
+    rgba(240, 240, 250, 0.1) 0
+  );
 }
 
-.calendar-ring em::after {
+.calendar-rings em::after {
   content: "";
   position: absolute;
-  inset: 5px;
+  inset: 3px;
   border-radius: inherit;
   background: var(--canvas);
 }
@@ -1505,9 +1514,6 @@ main {
   background: transparent;
 }
 
-.empty-ring::before {
-  display: none;
-}
 
 .history-list {
   display: grid;
@@ -1562,6 +1568,10 @@ main {
 .history-values {
   flex: 1;
   gap: 18px;
+}
+
+.history-value-empty {
+  color: var(--muted);
 }
 
 .history-value {
