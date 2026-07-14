@@ -80,5 +80,21 @@ test("rollout filename remains authoritative when a fork carries ancestor sessio
     token({ input_tokens: 80, output_tokens: 20, total_tokens: 100 })
   ], { filePath: "rollout-2026-07-14T00-00-00-current-thread.jsonl" });
   assert.equal(record.threadId, "current-thread");
+  assert.equal(record.parentThreadId, "ancestor-thread");
   assert.equal(record.events[0].threadId, "current-thread");
+  assert.equal(record.events[0].cumulativeUsage.total_tokens, 100);
+  assert.equal(record.events[0].usageStateId, "80:0:20:0:100");
+});
+
+test("fork and subagent parent metadata are retained without exposing conversation content", async () => {
+  const record = await parseRolloutLines([
+    line("session_meta", {
+      id: "child-thread",
+      forked_from_id: "parent-thread",
+      source: { subagent: { thread_spawn: { parent_thread_id: "parent-thread" } } }
+    }),
+    token({ input_tokens: 80, output_tokens: 20, total_tokens: 100 })
+  ], { filePath: "rollout-2026-07-14T00-00-00-child-thread.jsonl" });
+  assert.equal(record.parentThreadId, "parent-thread");
+  assert.equal(record.forkedFromId, "parent-thread");
 });

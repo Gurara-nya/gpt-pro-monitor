@@ -48,16 +48,21 @@ let codexSessionLoading = false;
 let codexSessionError = "";
 let codexSessionSearchTimer = null;
 let codexSessionAbortController = null;
+let codexUsageAbortController = null;
 let codexActiveTab = localStorage.getItem("gpt-monitor-codex-tab") === "sessions" ? "sessions" : "overview";
 let selectedUsageUserId = localStorage.getItem("gpt-monitor-usage-user") || "";
 let selectedDeviceId = localStorage.getItem("gpt-monitor-device") || "all";
 let deviceSettingsState = [];
+let deviceSettingsAbortController = null;
 let deviceOnboardingCommands = null;
 let deviceOnboardingDeviceId = "";
 let deviceOnboardingTokenCreatedAt = "";
 let deviceOnboardingPlatform = /windows/i.test(navigator.userAgent) ? "windows" : "unix";
 let deviceOnboardingPollTimer = null;
 let settingsUsageUserId = "";
+let settingsActiveTab = ["general", "data", "devices"].includes(localStorage.getItem("gpt-monitor-settings-tab"))
+  ? localStorage.getItem("gpt-monitor-settings-tab")
+  : "general";
 let toastTimer = null;
 let historyViewMode = "week";
 let historyCursorDate = new Date();
@@ -69,11 +74,12 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const APP_BASE_PATH = detectAppBasePath();
 const CODEX_SESSION_MOBILE = window.matchMedia("(max-width: 560px)");
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   setCodexTab(codexActiveTab, { load: false });
-  refreshState({ quiet: true });
-  refreshCodexUsage({ quiet: true });
+  setSettingsTab(settingsActiveTab);
+  await refreshState({ quiet: true });
+  await refreshCodexUsage({ quiet: true });
   setInterval(() => refreshState({ quiet: true }), 30000);
 });
 
@@ -119,13 +125,18 @@ function wireEvents() {
   });
   CODEX_SESSION_MOBILE.addEventListener?.("change", handleCodexSessionBreakpoint);
   $("#settingsButton").addEventListener("click", openSettings);
+  $("#settingsDialog").addEventListener("close", cleanupSettingsDialog);
+  for (const button of $$('[data-settings-tab]')) {
+    button.addEventListener("click", () => setSettingsTab(button.dataset.settingsTab));
+  }
+  $(".settings-tabs").addEventListener("keydown", handleSettingsTabKeydown);
   $("#closeSettingsButton").addEventListener("click", closeSettings);
   $("#cancelSettingsButton").addEventListener("click", closeSettings);
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsUsageUserSelect").addEventListener("change", (event) => {
     settingsUsageUserId = event.target.value;
     fillUsageUserSettings(getUsageUserById(settingsUsageUserId));
-    refreshDeviceSettings();
+    refreshDeviceSettings({ showLoading: true });
   });
   $("#addUsageUserButton").addEventListener("click", addUsageUser);
   $("#addPricingOverrideButton").addEventListener("click", () => appendPricingOverrideRow());
@@ -231,6 +242,35 @@ function handleCodexTabKeydown(event) {
   setCodexTab(next, { focus: true });
 }
 
+function setSettingsTab(tab, { focus = false } = {}) {
+  const allowed = ["general", "data", "devices"];
+  settingsActiveTab = allowed.includes(tab) ? tab : "general";
+  localStorage.setItem("gpt-monitor-settings-tab", settingsActiveTab);
+  for (const button of $$('[data-settings-tab]')) {
+    const selected = button.dataset.settingsTab === settingsActiveTab;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    if (selected && focus) button.focus();
+  }
+  for (const panel of $$('[data-settings-panel]')) {
+    panel.hidden = panel.dataset.settingsPanel !== settingsActiveTab;
+  }
+  $(".settings-body")?.scrollTo({ top: 0, behavior: "auto" });
+}
+
+function handleSettingsTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = ["general", "data", "devices"];
+  const currentIndex = Math.max(0, tabs.indexOf(settingsActiveTab));
+  let nextIndex = currentIndex;
+  if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = tabs.length - 1;
+  else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else nextIndex = (currentIndex + 1) % tabs.length;
+  setSettingsTab(tabs[nextIndex], { focus: true });
+}
+
 function handleCodexSessionBreakpoint() {
   codexSessionPage = 1;
   renderCodexSessionManager();
@@ -276,6 +316,7 @@ function selectUsageUser(userId) {
 }
 
 function currentDeviceId() {
+  if (!codexUsageState?.report) return selectedDeviceId || "all";
   const devices = codexUsageState?.report?.device_breakdown || [];
   return selectedDeviceId === "all" || devices.some((device) => device.id === selectedDeviceId)
     ? selectedDeviceId
@@ -323,6 +364,9 @@ async function refreshUsage(reason) {
 }
 
 async function refreshCodexUsage({ quiet = false, force = false } = {}) {
+  codexUsageAbortController?.abort();
+  const controller = new AbortController();
+  codexUsageAbortController = controller;
   const button = $("#codexUsageRefreshButton");
   if (button) {
     button.disabled = true;
@@ -331,19 +375,23 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
   try {
     const userId = currentUsageUserId();
     const deviceId = currentDeviceId();
-    codexUsageState = await api(
+    const result = await api(
       force ? "/api/codex-usage/refresh" : `/api/codex-usage?userId=${encodeURIComponent(userId)}&deviceId=${encodeURIComponent(deviceId)}`,
       {
         method: force ? "POST" : "GET",
+        signal: controller.signal,
         ...(force ? { body: JSON.stringify({ userId, deviceId }) } : {})
       }
     );
+    if (controller !== codexUsageAbortController) return;
+    codexUsageState = result;
     renderCodexUsage();
     if (codexActiveTab === "sessions" && (force || codexSessionState?.user?.id !== userId)) {
       await refreshCodexSessions({ quiet: true });
     }
     if (!quiet) showToast(codexUsageState.message || "Token 数据已同步");
   } catch (error) {
+    if (error.name === "AbortError" || controller !== codexUsageAbortController) return;
     codexUsageState = {
       status: "error",
       generatedAt: new Date().toISOString(),
@@ -353,7 +401,10 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
     renderCodexUsage();
     showToast(error.message);
   } finally {
-    if (button) {
+    if (controller === codexUsageAbortController) {
+      codexUsageAbortController = null;
+    }
+    if (!codexUsageAbortController && button) {
       button.disabled = false;
       button.classList.remove("spinning");
     }
@@ -511,6 +562,7 @@ function renderCodexUsage() {
     select.disabled = true;
     setCodexMetricValues("--", "--", "--", "--", "--", "--", {});
     $("#codexCostNote").textContent = codexCostNote(report);
+    renderTokenAudit(null);
     $("#codexDailyList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexSourceList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
@@ -541,11 +593,21 @@ function renderCodexUsage() {
     }
   );
   $("#codexCostNote").innerHTML = codexCostNote(report);
+  renderTokenAudit(report.token_audit, report.selected_device_id || "all");
   const deviceBreakdown = selectedView?.month
     ? report.device_breakdown_by_month?.[selectedView.month]
     : report.device_breakdown;
   renderDeviceBreakdown(deviceBreakdown || [], selectedView?.month || "");
-  $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
+  const allDailySeries = report.device_daily_by_month?.[selectedView?.month] || [];
+  const deviceDailySeries = report.selected_device_id && report.selected_device_id !== "all"
+    ? allDailySeries.filter((series) => String(series.id || series.device_id) === report.selected_device_id)
+    : allDailySeries;
+  $("#codexDailyList").innerHTML = renderCodexDaily(
+    selectedView?.days || [],
+    deviceDailySeries,
+    selectedView?.month || "",
+    report.selected_device_id || "all"
+  );
   setupDailyScroller($("#codexDailyList .token-daily-scroll"));
   $("#codexSourceList").innerHTML = renderCodexBars(selectedView?.sources || report.sources || [], "source");
   $("#codexModelList").innerHTML = renderCodexBars(selectedView?.models || report.models || [], "model");
@@ -568,10 +630,13 @@ function renderUsageUserSelect() {
     : `<option value="gurara">Gurara</option>`;
   select.value = selectedUsageUserId;
   select.hidden = users.length <= 1;
+  const filter = select.closest(".token-filter");
+  if (filter) filter.hidden = users.length <= 1;
 }
 
 function renderDeviceSelect() {
   const select = $("#deviceSelect");
+  if (!codexUsageState?.report) return;
   const devices = codexUsageState?.report?.device_breakdown || [];
   const allowed = new Set(devices.map((device) => device.id));
   if (selectedDeviceId !== "all" && !allowed.has(selectedDeviceId)) selectedDeviceId = "all";
@@ -581,6 +646,8 @@ function renderDeviceSelect() {
   ].join("");
   select.value = selectedDeviceId;
   select.hidden = devices.length <= 1;
+  const filter = select.closest(".token-filter");
+  if (filter) filter.hidden = devices.length <= 1;
 }
 
 function renderDeviceBreakdown(devices, month = "") {
@@ -716,76 +783,162 @@ function codexCostNote(report) {
   return `价格源：<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.name)}</a> · ${escapeHtml(source.checkedAt || "")}${split} · ${escapeHtml(source.note)}`;
 }
 
+function renderTokenAudit(audit, selectedDeviceId = "all") {
+  const panel = $("#tokenAuditStatus");
+  if (!panel) return;
+  if (!audit || typeof audit !== "object") {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+
+  const rawTokens = Number(audit.raw_sqlite_tokens) || 0;
+  const netTokens = Number(audit.net_tokens) || 0;
+  const excludedTokens = Number(audit.shared_history_tokens_excluded) || 0;
+  const excludedPercent = Number(audit.shared_history_percent) || 0;
+  const forkThreads = Number(audit.fork_threads) || 0;
+  const explicitForks = Number(audit.explicit_fork_threads) || 0;
+  const inferredForks = Number(audit.inferred_fork_threads) || 0;
+  const unresolvedForks = Number(audit.unresolved_fork_threads) || 0;
+  const splitOk = audit.split_invariants_ok !== false;
+  const deviceFiltered = selectedDeviceId && selectedDeviceId !== "all";
+  const warning = unresolvedForks > 0 || !splitOk;
+  const statusText = warning
+    ? `${unresolvedForks ? `${formatInteger(unresolvedForks)} 个 Fork 待确认` : "Token 拆分待校验"}`
+    : excludedTokens > 0 ? "共享历史已排除" : "未发现共享历史重复";
+
+  panel.hidden = false;
+  panel.classList.toggle("is-warning", warning);
+  panel.innerHTML = `
+    <div class="token-audit-head">
+      <div><p>Integrity</p><h3>全设备统计审计</h3></div>
+      <span class="token-audit-state">${escapeHtml(statusText)}</span>
+    </div>
+    <div class="token-audit-grid">
+      <span><b>去重后 Token</b><strong>${escapeHtml(formatCompactTokens(netTokens))}</strong><em>原始 ${escapeHtml(formatCompactTokens(rawTokens))}</em></span>
+      <span><b>排除共享历史</b><strong>${escapeHtml(formatCompactTokens(excludedTokens))}</strong><em>${escapeHtml(formatPercent(excludedPercent))} 的原始量</em></span>
+      <span><b>Fork 会话</b><strong>${escapeHtml(formatInteger(forkThreads))}</strong><em>显式 ${escapeHtml(formatInteger(explicitForks))} · 推断 ${escapeHtml(formatInteger(inferredForks))}</em></span>
+      <span><b>拆分校验</b><strong>${splitOk ? "通过" : "待检查"}</strong><em>${unresolvedForks ? `${escapeHtml(formatInteger(unresolvedForks))} 个关系未解析` : "输入、缓存和输出口径一致"}</em></span>
+    </div>
+    ${audit.message || deviceFiltered ? `<p class="token-audit-message">${audit.message ? escapeHtml(audit.message) : ""}${deviceFiltered ? `${audit.message ? " · " : ""}当前已筛选单个设备；本区仍显示全设备去重审计。` : ""}</p>` : ""}
+  `;
+}
+
 function findTodayUsage(days) {
   const key = localDateKey(new Date());
   return (Array.isArray(days) ? days : []).find((day) => day.day === key) || null;
 }
 
-function renderCodexDaily(days) {
-  const visible = (Array.isArray(days) ? days : [])
-    .filter((day) => Number(day.tokens) > 0);
-  if (!visible.length) return `<div class="empty-state">本月暂无日消耗数据</div>`;
-  const axisWidth = 92;
-  const minWidth = 960;
-  const height = 300;
+function renderCodexDaily(days, deviceSeries, month, selectedDeviceId = "all") {
+  const sourceDays = Array.isArray(days) ? days : [];
+  const sourceSeries = Array.isArray(deviceSeries) ? deviceSeries : [];
+  const hasTokenData = sourceDays.some((day) => Number(day.tokens) > 0) ||
+    sourceSeries.some((series) => (series.points || []).some((point) => Number(point.tokens) > 0));
+  if (!hasTokenData) return `<div class="empty-state">本月暂无日消耗数据</div>`;
+  const domain = codexDailyDomain(month, sourceDays, sourceSeries);
+  if (!domain.length) return `<div class="empty-state">本月暂无日消耗数据</div>`;
+
+  const dayRows = new Map(sourceDays.map((day) => [String(day.day || ""), day]));
+  const normalizedDays = domain.map((day) => {
+    const row = dayRows.get(day) || {};
+    const tokens = Number(row.tokens) || 0;
+    return {
+      ...row,
+      day,
+      tokens,
+      tokens_display: row.tokens_display || formatCompactTokens(tokens),
+      usage_split: row.usage_split || null,
+      cost_estimate: row.cost_estimate || { low_usd: 0, high_usd: 0, range_display: "$0" }
+    };
+  });
+  const normalizedSeries = normalizeDeviceDailySeries(sourceSeries, normalizedDays, domain, selectedDeviceId);
+  const axisWidth = 112;
+  const minWidth = 720;
+  const height = 316;
   const left = 18;
   const right = 26;
-  const top = 26;
+  const top = 24;
   const bottom = 54;
-  const pointSpacing = 72;
-  const chartWidth = Math.max(minWidth - left - right, Math.max(1, visible.length - 1) * pointSpacing);
+  const pointSpacing = domain.length > 20 ? 48 : 54;
+  const chartWidth = Math.max(minWidth - left - right, Math.max(1, domain.length - 1) * pointSpacing);
   const width = left + chartWidth + right;
   const chartHeight = height - top - bottom;
   const baseY = top + chartHeight;
-  const maxTokens = Math.max(...visible.map((day) => Number(day.tokens) || 0), 1);
+  const maxTokens = Math.max(
+    ...normalizedSeries.flatMap((series) => series.points.map((point) => point.tokens)),
+    1
+  );
   const yMax = maxTokens * 1.12;
-  const points = visible.map((day, index) => {
-    const x = visible.length === 1
-      ? left + chartWidth / 2
-      : left + index * chartWidth / (visible.length - 1);
-    const y = baseY - ((Number(day.tokens) || 0) / yMax) * chartHeight;
-    return { day, x, y };
-  });
-  const linePath = points.map((point, index) => `${index ? "L" : "M"} ${svgNumber(point.x)} ${svgNumber(point.y)}`).join(" ");
-  const areaPath = `${linePath} L ${svgNumber(points.at(-1).x)} ${svgNumber(baseY)} L ${svgNumber(points[0].x)} ${svgNumber(baseY)} Z`;
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-    const y = baseY - ratio * chartHeight;
-    const value = Math.round(yMax * ratio);
-    return { y, value };
-  });
-  const grid = yTicks.map(({ y }) => {
-    return `
-      <g>
-        <line x1="0" y1="${svgNumber(y)}" x2="${width - right}" y2="${svgNumber(y)}"></line>
-      </g>
-    `;
-  }).join("");
+  const xForIndex = (index) => domain.length === 1
+    ? left + chartWidth / 2
+    : left + index * chartWidth / (domain.length - 1);
+  const plottedSeries = normalizedSeries.map((series) => ({
+    ...series,
+    points: series.points.map((point, index) => ({
+      ...point,
+      x: xForIndex(index),
+      y: baseY - (point.tokens / yMax) * chartHeight
+    }))
+  }));
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({
+    y: baseY - ratio * chartHeight,
+    value: Math.round(yMax * ratio)
+  }));
+  const grid = yTicks.map(({ y }) => `<line x1="0" y1="${svgNumber(y)}" x2="${width - right}" y2="${svgNumber(y)}"></line>`).join("");
   const axis = yTicks.map(({ y, value }) => `
     <g>
       <line x1="${axisWidth - 8}" y1="${svgNumber(y)}" x2="${axisWidth}" y2="${svgNumber(y)}"></line>
       <text x="${axisWidth - 12}" y="${svgNumber(y + 4)}">${escapeHtml(formatCompactTokens(value))}</text>
     </g>
   `).join("");
-  const labelStep = Math.max(1, Math.ceil(visible.length / 7));
-  const labels = points.map((point, index) => {
-    if (index % labelStep !== 0 && index !== points.length - 1) return "";
-    return `<text x="${svgNumber(point.x)}" y="${height - 18}" text-anchor="middle">${escapeHtml(formatDayLabel(point.day.day))}</text>`;
+  const labelStep = Math.max(1, Math.ceil(domain.length / 7));
+  const labels = domain.map((day, index) => {
+    const lastIndex = domain.length - 1;
+    if (index !== lastIndex && (index % labelStep !== 0 || lastIndex - index < labelStep)) return "";
+    return `<text x="${svgNumber(xForIndex(index))}" y="${height - 18}" text-anchor="middle">${escapeHtml(formatDayLabel(day))}</text>`;
   }).join("");
-  const markers = points.map((point) => `
-    <g class="token-daily-point">
-      <circle cx="${svgNumber(point.x)}" cy="${svgNumber(point.y)}" r="5"></circle>
-      <title>${escapeHtml(`${formatDayLabel(point.day.day)} · ${point.day.tokens_display || "--"} · ${point.day.cost_estimate?.range_display || "--"} · ${formatUsageSplit(point.day.usage_split)} · ${formatInteger(point.day.threads)} 会话`)}</title>
-    </g>
-  `).join("");
-  const topDay = visible.reduce((best, day) => Number(day.tokens) > Number(best.tokens) ? day : best, visible[0]);
-  const today = findTodayUsage(visible) || visible.at(-1);
-  const summaryDays = visible.slice(-14);
-  const totalTokens = summaryDays.reduce((sum, day) => sum + (Number(day.tokens) || 0), 0);
+  const seriesMarkup = plottedSeries.map((series, index) => {
+    const style = codexDailySeriesStyle(index);
+    const linePath = series.points.map((point, pointIndex) => `${pointIndex ? "L" : "M"} ${svgNumber(point.x)} ${svgNumber(point.y)}`).join(" ");
+    const markers = series.points.filter((point) => point.tokens > 0).map((point) => `
+      <g class="token-daily-series-point" style="--series-stroke:${style.color}">
+        <circle cx="${svgNumber(point.x)}" cy="${svgNumber(point.y)}" r="4"></circle>
+        <title>${escapeHtml(`${series.name} · ${formatDayLabel(point.day)} · ${formatCompactTokens(point.tokens)} Token`)}</title>
+      </g>
+    `).join("");
+    return `
+      <g class="token-daily-series-group">
+        <path class="token-daily-series" style="--series-stroke:${style.color}" stroke-dasharray="${style.dash}" d="${escapeAttr(linePath)}"></path>
+        ${markers}
+      </g>
+    `;
+  }).join("");
+  const legend = plottedSeries.map((series, index) => {
+    const style = codexDailySeriesStyle(index);
+    const total = series.points.reduce((sum, point) => sum + point.tokens, 0);
+    return `
+      <span class="token-daily-legend-item">
+        <svg width="38" height="10" viewBox="0 0 38 10" aria-hidden="true"><line x1="1" y1="5" x2="37" y2="5" stroke="${style.color}" stroke-width="3" stroke-dasharray="${style.dash}"></line></svg>
+        <b>${escapeHtml(series.name)}</b>
+        <em>${escapeHtml(formatCompactTokens(total))}${series.stale ? " · 数据过期" : ""}</em>
+      </span>
+    `;
+  }).join("");
+  const topDay = normalizedDays.reduce((best, day) => day.tokens > best.tokens ? day : best, normalizedDays[0]);
+  const currentMonth = localDateKey(new Date()).slice(0, 7);
+  const endpointDay = month === currentMonth
+    ? findTodayUsage(normalizedDays) || normalizedDays.at(-1)
+    : normalizedDays.at(-1);
+  const endpointLabel = month === currentMonth ? "今日" : "月末";
+  const summaryDays = normalizedDays.slice(-14);
+  const totalTokens = summaryDays.reduce((sum, day) => sum + day.tokens, 0);
   const totalLow = summaryDays.reduce((sum, day) => sum + (Number(day.cost_estimate?.low_usd) || 0), 0);
   const totalHigh = summaryDays.reduce((sum, day) => sum + (Number(day.cost_estimate?.high_usd) || 0), 0);
+  const ariaLabel = `${formatMonthLabel(month)}每日 Token 消耗，${plottedSeries.map((series) => series.name).join("、")}`;
 
   return `
     <div class="token-daily-chart">
+      <div class="token-daily-legend" aria-label="设备曲线图例">${legend}</div>
       <div class="token-daily-plot" style="--daily-axis-width:${axisWidth}px">
         <div class="token-daily-axis-frame" aria-hidden="true">
           <svg class="token-daily-axis" width="${axisWidth}" height="${height}" viewBox="0 0 ${axisWidth} ${height}" focusable="false">
@@ -793,22 +946,68 @@ function renderCodexDaily(days) {
           </svg>
         </div>
         <div class="token-daily-scroll" tabindex="0" role="region" aria-label="每日 Token 消耗时间轴">
-          <svg class="token-daily-svg" width="${width}" height="${height}" style="min-width:${width}px" viewBox="0 0 ${width} ${height}" role="img" aria-label="每日 Token 消耗折线图">
+          <svg class="token-daily-svg" width="${width}" height="${height}" style="min-width:${width}px" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeAttr(ariaLabel)}">
             <g class="token-daily-grid">${grid}</g>
-            <path class="token-daily-area" d="${escapeAttr(areaPath)}"></path>
-            <path class="token-daily-line" d="${escapeAttr(linePath)}"></path>
-            <g class="token-daily-markers">${markers}</g>
+            <g class="token-daily-series-list">${seriesMarkup}</g>
             <g class="token-daily-labels">${labels}</g>
           </svg>
         </div>
       </div>
       <div class="token-daily-summary">
-        ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display || "--"}`, `${topDay.cost_estimate?.range_display || "--"} · ${formatUsageSplit(topDay.usage_split)}`)}
-        ${dailySummaryItem("今日", `${formatDayLabel(today.day)} · ${today.tokens_display || "--"}`, `${today.cost_estimate?.range_display || "--"} · ${formatUsageSplit(today.usage_split)}`)}
-        ${dailySummaryItem("近 14 次", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${summaryDays.length} 天`)}
+        ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display}`, `${topDay.cost_estimate?.range_display || "$0"} · ${formatUsageSplit(topDay.usage_split)}`)}
+        ${dailySummaryItem(endpointLabel, `${formatDayLabel(endpointDay.day)} · ${endpointDay.tokens_display}`, `${endpointDay.cost_estimate?.range_display || "$0"} · ${formatUsageSplit(endpointDay.usage_split)}`)}
+        ${dailySummaryItem("近 14 天", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${summaryDays.length} 个自然日`)}
       </div>
     </div>
   `;
+}
+
+function codexDailyDomain(month, days, series) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(month || ""));
+  if (match) {
+    const year = Number(match[1]);
+    const monthNumber = Number(match[2]);
+    const daysInMonth = new Date(year, monthNumber, 0).getDate();
+    const todayKey = localDateKey(new Date());
+    const endDay = todayKey.startsWith(`${month}-`)
+      ? Math.min(daysInMonth, Number(todayKey.slice(-2)))
+      : daysInMonth;
+    return Array.from({ length: endDay }, (_, index) => `${month}-${pad2(index + 1)}`);
+  }
+  return [...new Set([
+    ...(Array.isArray(days) ? days : []).map((day) => String(day.day || "")),
+    ...(Array.isArray(series) ? series : []).flatMap((item) => (item.points || []).map((point) => String(point.day || "")))
+  ].filter(Boolean))].sort();
+}
+
+function normalizeDeviceDailySeries(series, normalizedDays, domain, selectedDeviceId) {
+  const input = Array.isArray(series) && series.length
+    ? series
+    : [{
+        id: selectedDeviceId || "all",
+        name: selectedDeviceId && selectedDeviceId !== "all" ? selectedDeviceId : "全部设备合计",
+        points: normalizedDays.map((day) => ({ day: day.day, tokens: day.tokens }))
+      }];
+  return input.map((item) => {
+    const values = new Map((Array.isArray(item.points) ? item.points : []).map((point) => [String(point.day || ""), Number(point.tokens) || 0]));
+    return {
+      id: String(item.id || item.device_id || "unknown"),
+      name: String(item.name || item.device_name || item.id || "未知设备"),
+      stale: item.stale === true,
+      points: domain.map((day) => ({ day, tokens: Math.max(0, values.get(day) || 0) }))
+    };
+  });
+}
+
+function codexDailySeriesStyle(index) {
+  const styles = [
+    { color: "#f0f0fa", dash: "" },
+    { color: "#b6b7bf", dash: "14 8" },
+    { color: "#858790", dash: "3 7" },
+    { color: "#d2d2d8", dash: "18 7 3 7" },
+    { color: "#666872", dash: "9 6" }
+  ];
+  return styles[index % styles.length];
 }
 
 function dailySummaryItem(label, value, note) {
@@ -1302,25 +1501,46 @@ function openSettings() {
   if (!state) return;
   settingsUsageUserId = currentUsageUserId();
   fillSettingsForm(state.config);
+  setSettingsTab(settingsActiveTab);
   $("#settingsDialog").showModal();
   syncIcons();
-  refreshDeviceSettings();
+  refreshDeviceSettings({ showLoading: true });
 }
 
 function closeSettings() {
   $("#settingsDialog").close();
+}
+
+function cleanupSettingsDialog() {
+  deviceSettingsAbortController?.abort();
+  deviceSettingsAbortController = null;
   hideDeviceCommand();
 }
 
-async function refreshDeviceSettings() {
+async function refreshDeviceSettings({ showLoading = false } = {}) {
+  deviceSettingsAbortController?.abort();
+  const controller = new AbortController();
+  deviceSettingsAbortController = controller;
+  const list = $("#deviceSettingsList");
+  list?.setAttribute("aria-busy", "true");
+  if (showLoading && list) list.innerHTML = `<div class="empty-state is-loading">正在读取设备状态…</div>`;
   try {
-    const result = await api(`/api/devices?userId=${encodeURIComponent(settingsUsageUserId || currentUsageUserId())}&_=${Date.now()}`);
+    const result = await api(`/api/devices?userId=${encodeURIComponent(settingsUsageUserId || currentUsageUserId())}&_=${Date.now()}`, {
+      signal: controller.signal
+    });
+    if (controller !== deviceSettingsAbortController) return [];
     deviceSettingsState = result.devices || [];
     renderDeviceSettings();
     return deviceSettingsState;
   } catch (error) {
+    if (error.name === "AbortError" || controller !== deviceSettingsAbortController) return [];
     $("#deviceSettingsList").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
     return [];
+  } finally {
+    if (controller === deviceSettingsAbortController) {
+      deviceSettingsAbortController = null;
+      list?.setAttribute("aria-busy", "false");
+    }
   }
 }
 
@@ -1338,8 +1558,20 @@ function renderDeviceSettings() {
         <div><dt>运行方式</dt><dd>${escapeHtml(device.builtIn ? "服务端" : device.agentInstalled ? "自动运行" : device.lastSeenAt ? "手动运行" : "--")}</dd></div>
       </dl>
       <div class="device-settings-actions">
-        <button class="text-button" type="button" data-device-action="rename">改名</button>
-        ${device.builtIn ? "" : `<button class="text-button" type="button" data-device-action="sync">同步命令</button><button class="text-button" type="button" data-device-action="rotate">重新接入</button><button class="text-button" type="button" data-device-action="toggle">${device.enabled && !device.revoked ? "停用" : "启用"}</button><button class="text-button danger" type="button" data-device-action="remove">删除</button>`}
+        ${device.builtIn
+          ? `<button class="text-button" type="button" data-device-action="rename">改名</button>`
+          : `
+            <button class="filled-button device-sync-action" type="button" data-device-action="sync">同步命令</button>
+            <details class="device-more-actions">
+              <summary class="text-button">更多</summary>
+              <div class="device-more-menu">
+                <button class="text-button" type="button" data-device-action="rename">改名</button>
+                <button class="text-button" type="button" data-device-action="rotate">重新接入</button>
+                <button class="text-button" type="button" data-device-action="toggle">${device.enabled && !device.revoked ? "停用" : "启用"}</button>
+                <button class="text-button danger" type="button" data-device-action="remove">移除</button>
+              </div>
+            </details>
+          `}
       </div>
     </article>
   `).join("") : `<div class="empty-state">暂无设备</div>`;
@@ -1404,7 +1636,7 @@ async function manageDevice(deviceId, action) {
         body: JSON.stringify({ userId, enabled: !(device?.enabled && !device?.revoked) })
       });
     } else if (action === "remove") {
-      if (!confirm(`删除“${device?.name || deviceId}”的设备登记？已接收的统计数据会保留。`)) return;
+      if (!confirm(`移除“${device?.name || deviceId}”的设备登记？原始接收记录会保留，但该设备历史将不再计入仪表盘。`)) return;
       await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
         method: "DELETE",
         body: JSON.stringify({ userId })

@@ -12,7 +12,7 @@ const AGENT_HOME = path.join(os.homedir(), ".gpt-monitor");
 const CONFIG_FILE = path.join(AGENT_HOME, "device-agent.json");
 const STATE_FILE = path.join(AGENT_HOME, "device-agent-state.json");
 const INSTALLED_AGENT_FILE = path.join(AGENT_HOME, "device-agent.js");
-const AGENT_VERSION = "2.0.0";
+const AGENT_VERSION = "2.1.0";
 const WINDOWS_TASK_NAME = "GPT Monitor Device Agent";
 const LINUX_SERVICE_FILE = path.join(os.homedir(), ".config", "systemd", "user", "gpt-monitor-agent.service");
 const MACOS_PLIST_FILE = path.join(os.homedir(), "Library", "LaunchAgents", "com.gpt-monitor.device-agent.plist");
@@ -51,7 +51,7 @@ function count(value) {
 function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
   const usage = Object.fromEntries(USAGE_KEYS.map((key) => [key, count(value[key])]));
-  if (!usage.total_tokens) usage.total_tokens = usage.input_tokens + usage.output_tokens;
+  if (usage.input_tokens || usage.output_tokens) usage.total_tokens = usage.input_tokens + usage.output_tokens;
   usage.cached_input_tokens = Math.min(usage.cached_input_tokens, usage.input_tokens);
   usage.reasoning_output_tokens = Math.min(usage.reasoning_output_tokens, usage.output_tokens);
   return usage.total_tokens ? usage : null;
@@ -76,6 +76,29 @@ function usageDelta(current, previous = {}) {
 function eventId(threadHash, cumulative) {
   const state = USAGE_KEYS.map((key) => count(cumulative[key])).join(":");
   return sha(`${threadHash}\0${state}`);
+}
+
+function usageStateId(cumulative) {
+  const state = USAGE_KEYS.map((key) => count(cumulative?.[key])).join(":");
+  return sha(state);
+}
+
+function parentThreadId(value, depth = 0) {
+  if (!value || depth > 6) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    try { return parentThreadId(JSON.parse(trimmed), depth + 1); } catch { return ""; }
+  }
+  if (typeof value !== "object") return "";
+  for (const key of ["parent_thread_id", "parentThreadId", "forked_from_id", "forkedFromId"]) {
+    if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+  }
+  for (const key of ["thread_spawn", "subagent", "source", "metadata"]) {
+    const found = parentThreadId(value[key], depth + 1);
+    if (found) return found;
+  }
+  return "";
 }
 
 async function readJson(filePath, fallback) {
@@ -288,14 +311,15 @@ async function scanFile(filePath, cursor = {}) {
   const stat = await fsp.stat(filePath);
   const fileThreadId = idFromPath(filePath);
   let offset = Math.min(count(cursor.offset), stat.size);
-  if (stat.size < count(cursor.offset) || cursor.parserVersion !== 2 || (fileThreadId && cursor.threadId !== fileThreadId)) {
+  if (stat.size < count(cursor.offset) || cursor.parserVersion !== 3 || (fileThreadId && cursor.threadId !== fileThreadId)) {
     offset = 0;
   }
   const state = offset ? { ...cursor } : {
-    parserVersion: 2,
+    parserVersion: 3,
     offset: 0,
     threadId: fileThreadId,
     threadHash: sha(fileThreadId),
+    parentThreadHash: "",
     model: "",
     provider: "",
     previousUsage: {}
@@ -315,6 +339,11 @@ async function scanFile(filePath, cursor = {}) {
         state.threadId = String(payload.id);
         state.threadHash = sha(state.threadId);
       }
+      const parentId = parentThreadId(payload);
+      if (parentId && parentId !== state.threadId) state.parentThreadHash = sha(parentId);
+      if (!state.parentThreadHash && fileThreadId && payload.id && String(payload.id) !== fileThreadId) {
+        state.parentThreadHash = sha(String(payload.id));
+      }
       if (payload.model_provider) state.provider = String(payload.model_provider);
       continue;
     }
@@ -332,6 +361,9 @@ async function scanFile(filePath, cursor = {}) {
     events.push({
       eventId: eventId(state.threadHash, cumulative),
       threadHash: state.threadHash,
+      parentThreadHash: state.parentThreadHash || "",
+      usageStateId: usageStateId(cumulative),
+      cumulativeTotalTokens: count(cumulative.total_tokens),
       at,
       model: state.model || "unknown",
       provider: state.provider || "",
@@ -389,6 +421,14 @@ async function sync(config) {
     next.files[filePath] = result.cursor;
   }
   const snapshots = await sqliteSnapshots(config.codexHome);
+  const lineageByThreadHash = new Map(
+    Object.values(next.files || {})
+      .filter((item) => item?.threadHash && item?.parentThreadHash)
+      .map((item) => [item.threadHash, item.parentThreadHash])
+  );
+  for (const snapshot of snapshots) {
+    snapshot.parentThreadHash ||= lineageByThreadHash.get(snapshot.threadHash) || "";
+  }
   const batches = Math.max(1, Math.ceil(Math.max(events.length, snapshots.length) / MAX_BATCH));
   let accepted = 0;
   let duplicates = 0;
@@ -462,9 +502,11 @@ module.exports = {
   agentMetadata,
   eventId,
   normalizeUsage,
+  parentThreadId,
   retryDelayMs,
   scanFile,
   sync,
   systemdQuote,
+  usageStateId,
   usageDelta
 };

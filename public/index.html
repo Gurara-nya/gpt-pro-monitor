@@ -42,37 +42,6 @@
       <main>
         <section class="window-grid" id="windowGrid" aria-label="核心用量窗口" aria-live="polite"></section>
 
-        <section class="history-panel" aria-label="同步历史">
-          <div class="panel-head">
-            <div class="history-heading">
-              <div class="range-control">
-                <button class="range-arrow" id="prevPeriodButton" type="button" aria-label="上一段">
-                  <i data-lucide="chevron-left"></i>
-                </button>
-                <strong id="historyRangeLabel">--</strong>
-                <button class="range-arrow" id="nextPeriodButton" type="button" aria-label="下一段">
-                  <i data-lucide="chevron-right"></i>
-                </button>
-              </div>
-            </div>
-            <div class="history-actions">
-              <div class="view-tabs" role="tablist" aria-label="历史视图">
-                <button class="view-tab" data-view="day" type="button">日</button>
-                <button class="view-tab" data-view="week" type="button">周</button>
-                <button class="view-tab" data-view="month" type="button">月</button>
-              </div>
-              <button class="icon-button quiet" id="clearButton" type="button" aria-label="清空历史" title="清空历史">
-                <i data-lucide="trash-2"></i>
-              </button>
-            </div>
-          </div>
-          <div class="history-chart" id="historyChart"></div>
-          <div class="history-list" id="historyList"></div>
-          <button class="history-list-toggle" id="toggleHistoryListButton" type="button" hidden>
-            展开列表
-          </button>
-        </section>
-
         <section class="history-panel token-panel" aria-label="Codex Token 消耗">
           <div class="panel-head token-panel-head">
             <div class="token-title">
@@ -81,16 +50,29 @@
               <small id="codexUsageStatus" role="status" aria-live="polite">等待同步</small>
             </div>
             <div class="token-actions">
-              <select id="usageUserSelect" aria-label="选择数据用户"></select>
-              <select id="deviceSelect" aria-label="选择设备"><option value="all">全部设备</option></select>
-              <select id="codexMonthSelect" aria-label="选择 Token 月份"></select>
-              <button class="icon-button quiet" id="codexUsageRefreshButton" type="button" aria-label="刷新 Token 数据" title="刷新 Token 数据">
-                <i data-lucide="refresh-cw"></i>
-              </button>
-              <button class="text-button" id="codexUsageReportButton" type="button">
-                <i data-lucide="file-text"></i>
-                <span>报告</span>
-              </button>
+              <div class="token-filters" aria-label="消耗数据筛选">
+                <label class="token-filter">
+                  <span>用户</span>
+                  <select id="usageUserSelect" aria-label="选择数据用户"></select>
+                </label>
+                <label class="token-filter">
+                  <span>设备</span>
+                  <select id="deviceSelect" aria-label="选择设备"><option value="all">全部设备</option></select>
+                </label>
+                <label class="token-filter">
+                  <span>月份</span>
+                  <select id="codexMonthSelect" aria-label="选择 Token 月份"></select>
+                </label>
+              </div>
+              <div class="token-action-buttons">
+                <button class="icon-button quiet" id="codexUsageRefreshButton" type="button" aria-label="刷新 Token 数据" title="刷新 Token 数据">
+                  <i data-lucide="refresh-cw"></i>
+                </button>
+                <button class="text-button" id="codexUsageReportButton" type="button">
+                  <i data-lucide="file-text"></i>
+                  <span>报告</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -104,38 +86,63 @@
           </div>
 
           <div class="token-tab-panel" id="codexOverviewPanel" role="tabpanel" aria-labelledby="codexOverviewTab">
-            <div class="token-metrics">
-              <div class="token-metric token-metric-primary">
-                <span>累计 API 等价成本</span>
-                <strong id="codexTotalCost">--</strong>
-                <small id="codexTotalCostDetail">--</small>
-              </div>
-              <div class="token-metric token-metric-primary">
-                <span>本月 API 等价成本</span>
-                <strong id="codexMonthCost">--</strong>
-                <small id="codexMonthCostDetail">--</small>
-              </div>
-              <div class="token-metric token-metric-primary">
-                <span>今日 API 等价成本</span>
-                <strong id="codexTodayCost">--</strong>
-                <small id="codexTodayCostDetail">--</small>
-              </div>
-              <div class="token-metric">
-                <span>累计 Token</span>
-                <strong id="codexTotalTokens">--</strong>
-              </div>
-              <div class="token-metric">
-                <span>本月 Token</span>
-                <strong id="codexMonthTokens">--</strong>
-              </div>
-              <div class="token-metric">
-                <span>本月会话 / 均值</span>
-                <strong id="codexMonthThreads">--</strong>
-              </div>
+            <div class="token-metric-groups">
+              <section class="token-metric-group" aria-labelledby="codexCostMetricsTitle">
+                <div class="token-metric-group-head">
+                  <p>Cost</p>
+                  <h3 id="codexCostMetricsTitle">API 等价成本</h3>
+                </div>
+                <div class="token-metrics token-cost-metrics">
+                  <div class="token-metric token-metric-primary">
+                    <span>累计</span>
+                    <strong id="codexTotalCost">--</strong>
+                    <small id="codexTotalCostDetail">--</small>
+                  </div>
+                  <div class="token-metric token-metric-primary">
+                    <span>本月</span>
+                    <strong id="codexMonthCost">--</strong>
+                    <small id="codexMonthCostDetail">--</small>
+                  </div>
+                  <div class="token-metric token-metric-primary">
+                    <span>今日</span>
+                    <strong id="codexTodayCost">--</strong>
+                    <small id="codexTodayCostDetail">--</small>
+                  </div>
+                </div>
+              </section>
+              <section class="token-metric-group" aria-labelledby="codexTokenMetricsTitle">
+                <div class="token-metric-group-head">
+                  <p>Volume</p>
+                  <h3 id="codexTokenMetricsTitle">Token 用量</h3>
+                </div>
+                <div class="token-metrics token-volume-metrics">
+                  <div class="token-metric">
+                    <span>累计 Token</span>
+                    <strong id="codexTotalTokens">--</strong>
+                  </div>
+                  <div class="token-metric">
+                    <span>本月 Token</span>
+                    <strong id="codexMonthTokens">--</strong>
+                  </div>
+                  <div class="token-metric">
+                    <span>本月会话 / 均值</span>
+                    <strong id="codexMonthThreads">--</strong>
+                  </div>
+                </div>
+              </section>
             </div>
             <p class="token-cost-note" id="codexCostNote">API 等价成本按 OpenAI 官方输入/缓存输入/输出价格估算，不是 ChatGPT 套餐账单。</p>
+            <section class="token-audit" id="tokenAuditStatus" aria-label="Token 统计审计" aria-live="polite" hidden></section>
 
-            <section class="device-breakdown" aria-label="设备用量占比">
+            <section class="token-daily token-overview-section" aria-label="日消耗">
+              <div class="token-section-head">
+                <div><p>Trend</p><h3>日消耗趋势</h3></div>
+                <small>每台设备独立成线，空缺日期按 0 计。</small>
+              </div>
+              <div class="token-daily-list" id="codexDailyList"></div>
+            </section>
+
+            <section class="device-breakdown token-overview-section" aria-label="设备用量占比">
               <div class="device-breakdown-head">
                 <div><p>Devices</p><h3>设备用量占比</h3></div>
                 <small id="deviceBreakdownPeriod">按所选月份统计总 Token 与 API 等价成本占比</small>
@@ -144,10 +151,6 @@
             </section>
 
             <div class="token-breakdowns">
-              <section class="token-daily" aria-label="日消耗">
-                <h3>日消耗</h3>
-                <div class="token-daily-list" id="codexDailyList"></div>
-              </section>
               <section aria-label="主要入口">
                 <h3>主要入口</h3>
                 <div class="token-bars" id="codexSourceList"></div>
@@ -199,6 +202,39 @@
             </nav>
           </section>
         </section>
+
+        <section class="history-panel sync-history-panel" aria-label="同步历史">
+          <div class="panel-head">
+            <div class="history-heading">
+              <p>Quota history</p>
+              <h2>额度同步历史</h2>
+              <div class="range-control">
+                <button class="range-arrow" id="prevPeriodButton" type="button" aria-label="上一段">
+                  <i data-lucide="chevron-left"></i>
+                </button>
+                <strong id="historyRangeLabel">--</strong>
+                <button class="range-arrow" id="nextPeriodButton" type="button" aria-label="下一段">
+                  <i data-lucide="chevron-right"></i>
+                </button>
+              </div>
+            </div>
+            <div class="history-actions">
+              <div class="view-tabs" role="tablist" aria-label="历史视图">
+                <button class="view-tab" data-view="day" type="button">日</button>
+                <button class="view-tab" data-view="week" type="button">周</button>
+                <button class="view-tab" data-view="month" type="button">月</button>
+              </div>
+              <button class="icon-button quiet" id="clearButton" type="button" aria-label="清空历史" title="清空历史">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+          </div>
+          <div class="history-chart" id="historyChart"></div>
+          <div class="history-list" id="historyList"></div>
+          <button class="history-list-toggle" id="toggleHistoryListButton" type="button" hidden>
+            展开列表
+          </button>
+        </section>
       </main>
     </div>
 
@@ -214,177 +250,113 @@
           </button>
         </header>
 
+        <div class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button class="settings-tab" id="settingsGeneralTab" type="button" role="tab" aria-controls="settingsGeneralPanel" data-settings-tab="general">常规</button>
+          <button class="settings-tab" id="settingsDataTab" type="button" role="tab" aria-controls="settingsDataPanel" data-settings-tab="data">数据与价格</button>
+          <button class="settings-tab" id="settingsDevicesTab" type="button" role="tab" aria-controls="settingsDevicesPanel" data-settings-tab="devices">远程设备</button>
+        </div>
+
         <div class="settings-body">
-          <section>
-            <h3>账号与接口</h3>
-            <div class="form-grid">
-              <label>
-                <span>显示名称</span>
-                <input name="account.label" autocomplete="off" />
-              </label>
-              <label>
-                <span>套餐名称</span>
-                <input name="account.planName" autocomplete="off" />
-              </label>
-              <label class="wide">
-                <span>Codex 登录文件</span>
-                <input name="account.authPath" autocomplete="off" />
-              </label>
-              <label class="wide">
-                <span>用量接口</span>
-                <input name="account.endpoint" autocomplete="off" />
-              </label>
-              <label class="check-row">
-                <input name="account.enabled" type="checkbox" />
-                <span>启用监控</span>
-              </label>
-            </div>
+          <section class="settings-tab-panel" id="settingsGeneralPanel" role="tabpanel" aria-labelledby="settingsGeneralTab" data-settings-panel="general">
+            <section class="settings-card">
+              <div class="settings-section-head"><div><p>Account</p><h3>账号与接口</h3></div><small>配置当前额度账号和上游用量接口。</small></div>
+              <div class="form-grid">
+                <label><span>显示名称</span><input name="account.label" autocomplete="off" /></label>
+                <label><span>套餐名称</span><input name="account.planName" autocomplete="off" /></label>
+                <label class="wide"><span>Codex 登录文件</span><input name="account.authPath" autocomplete="off" /></label>
+                <label class="wide"><span>用量接口</span><input name="account.endpoint" autocomplete="off" /></label>
+                <label class="check-row"><input name="account.enabled" type="checkbox" /><span>启用监控</span></label>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-section-head"><div><p>Schedule</p><h3>自动同步</h3></div><small>控制额度数据的后台轮询频率。</small></div>
+              <div class="form-grid">
+                <label><span>间隔分钟</span><input name="schedule.intervalMinutes" type="number" min="5" max="1440" /></label>
+                <label class="check-row"><input name="schedule.enabled" type="checkbox" /><span>自动同步</span></label>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-section-head"><div><p>Appearance</p><h3>外观与密度</h3></div><small>保留黑白遥测风格，调整信息密度与动态效果。</small></div>
+              <div class="form-grid">
+                <label><span>强调色</span><input name="appearance.accentColor" type="color" /></label>
+                <label><span>密度</span><select name="appearance.density"><option value="comfortable">舒适</option><option value="compact">紧凑</option><option value="roomy">宽松</option></select></label>
+                <label class="check-row"><input name="appearance.reduceMotion" type="checkbox" /><span>减少动态效果</span></label>
+              </div>
+            </section>
           </section>
 
-          <section>
-            <h3>轮询</h3>
-            <div class="form-grid">
-              <label>
-                <span>间隔分钟</span>
-                <input name="schedule.intervalMinutes" type="number" min="5" max="1440" />
-              </label>
-              <label class="check-row">
-                <input name="schedule.enabled" type="checkbox" />
-                <span>自动同步</span>
-              </label>
-            </div>
-          </section>
-
-          <section>
-            <h3>用户数据</h3>
-            <div class="form-grid">
-              <label>
-                <span>数据用户</span>
-                <select id="settingsUsageUserSelect"></select>
-              </label>
-              <label>
-                <span>用户名称</span>
-                <input id="settingsUsageUserLabel" autocomplete="off" />
-              </label>
-              <label class="wide">
-                <span>SQLite 数据库路径</span>
-                <input id="settingsCodexDbPath" autocomplete="off" />
-              </label>
-              <label class="wide">
-                <span>上传 SQLite</span>
-                <input id="codexDbFile" type="file" accept=".sqlite,.sqlite3,.db" />
-              </label>
-              <label>
-                <span>高消耗会话数</span>
-                <input id="settingsCodexTopSessions" type="number" min="1" max="50" />
-              </label>
-              <label class="check-row">
-                <input id="settingsCodexEnabled" type="checkbox" />
-                <span>启用 Token 面板</span>
-              </label>
-              <div class="pricing-editor wide">
-                <div class="pricing-editor-head">
-                  <span>模型价格覆盖（USD / 1M Token）</span>
-                  <button class="text-button" id="addPricingOverrideButton" type="button">添加价格</button>
+          <section class="settings-tab-panel" id="settingsDataPanel" role="tabpanel" aria-labelledby="settingsDataTab" data-settings-panel="data" hidden>
+            <section class="settings-card">
+              <div class="settings-section-head"><div><p>Codex data</p><h3>用户数据</h3></div><small>管理 SQLite 数据源、会话预览和模型价格覆盖。</small></div>
+              <div class="form-grid">
+                <label><span>数据用户</span><select id="settingsUsageUserSelect"></select></label>
+                <label><span>用户名称</span><input id="settingsUsageUserLabel" autocomplete="off" /></label>
+                <label class="wide"><span>SQLite 数据库路径</span><input id="settingsCodexDbPath" autocomplete="off" /></label>
+                <label class="wide"><span>上传 SQLite</span><input id="codexDbFile" type="file" accept=".sqlite,.sqlite3,.db" /></label>
+                <label><span>高消耗会话数</span><input id="settingsCodexTopSessions" type="number" min="1" max="50" /></label>
+                <label class="check-row"><input id="settingsCodexEnabled" type="checkbox" /><span>启用 Token 面板</span></label>
+                <div class="pricing-editor wide">
+                  <div class="pricing-editor-head"><span>模型价格覆盖（USD / 1M Token）</span><button class="text-button" id="addPricingOverrideButton" type="button">添加价格</button></div>
+                  <div id="pricingOverrideRows"></div>
+                  <small>留空时使用带版本日期的 OpenAI 官方价格。费用均为 API 等价成本估算。</small>
                 </div>
-                <div id="pricingOverrideRows"></div>
-                <small>留空时使用带版本日期的 OpenAI 官方价格。费用均为 API 等价成本估算。</small>
+                <button class="text-button" id="addUsageUserButton" type="button">新增用户</button>
+                <button class="text-button" id="codexDbUploadButton" type="button">上传并刷新</button>
               </div>
-              <button class="text-button" id="addUsageUserButton" type="button">新增用户</button>
-              <button class="text-button" id="codexDbUploadButton" type="button">上传并刷新</button>
-            </div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-section-head"><div><p>Sub2API</p><h3>Sub2API 用户数据</h3></div><small>可选的数据补充源；密钥留空时保持原值。</small></div>
+              <div class="form-grid">
+                <label class="wide"><span>Base URL</span><input id="settingsSub2ApiBaseUrl" autocomplete="off" /></label>
+                <label class="wide"><span>API Key</span><input id="settingsSub2ApiKey" type="password" autocomplete="off" placeholder="留空不变" /></label>
+                <label><span>起始日期</span><input id="settingsSub2ApiStartDate" type="date" /></label>
+                <label><span>回看天数</span><input id="settingsSub2ApiLookbackDays" type="number" min="1" max="730" /></label>
+                <label class="check-row"><input id="settingsSub2ApiEnabled" type="checkbox" /><span>启用 Sub2API</span></label>
+                <button class="text-button" id="sub2ApiKeySaveButton" type="button">保存 Key 并刷新</button>
+              </div>
+            </section>
           </section>
 
-          <section>
-            <h3>Sub2API 用户数据</h3>
-            <div class="form-grid">
-              <label class="wide">
-                <span>Base URL</span>
-                <input id="settingsSub2ApiBaseUrl" autocomplete="off" />
-              </label>
-              <label class="wide">
-                <span>API Key</span>
-                <input id="settingsSub2ApiKey" type="password" autocomplete="off" placeholder="留空不变" />
-              </label>
-              <label>
-                <span>起始日期</span>
-                <input id="settingsSub2ApiStartDate" type="date" />
-              </label>
-              <label>
-                <span>回看天数</span>
-                <input id="settingsSub2ApiLookbackDays" type="number" min="1" max="730" />
-              </label>
-              <label class="check-row">
-                <input id="settingsSub2ApiEnabled" type="checkbox" />
-                <span>启用 Sub2API</span>
-              </label>
-              <button class="text-button" id="sub2ApiKeySaveButton" type="button">保存 Key 并刷新</button>
-            </div>
-          </section>
-
-          <section>
-            <div class="device-settings-heading">
-              <div><h3>远端设备</h3><small>输入名称后，把生成的一条命令发到新设备运行即可。</small></div>
-              <a class="text-button" href="help" target="_blank" rel="noopener">接入帮助</a>
-            </div>
-            <div class="device-create-row">
-              <label>
-                <span>设备名称</span>
-                <input id="newDeviceName" autocomplete="off" placeholder="例如：办公室电脑" maxlength="120" />
-              </label>
-              <button class="filled-button" id="createDeviceButton" type="button">添加设备</button>
-            </div>
-
-            <div class="device-onboarding" id="deviceCommandField" hidden>
-              <div class="device-onboarding-head">
-                <div><span class="status-badge success" id="deviceOnboardingBadge">等待安装</span><strong id="deviceOnboardingTitle">在新设备运行一条命令</strong></div>
-                <button class="icon-button quiet" id="closeDeviceCommandButton" type="button" aria-label="关闭接入命令">×</button>
+          <section class="settings-tab-panel" id="settingsDevicesPanel" role="tabpanel" aria-labelledby="settingsDevicesTab" data-settings-panel="devices" hidden>
+            <section class="settings-card settings-device-card">
+              <div class="device-settings-heading">
+                <div><p>Devices</p><h3>远端设备</h3><small>输入名称后，把生成的一条命令发到新设备运行即可。</small></div>
+                <a class="text-button" href="help" target="_blank" rel="noopener">接入帮助</a>
               </div>
-              <ol class="device-onboarding-steps">
-                <li>新设备先安装 <strong>Node.js 22+</strong></li>
-                <li>选择系统，复制并运行下面的命令</li>
-                <li>页面会自动等待并确认首次同步</li>
-              </ol>
-              <div class="device-platform-tabs" role="tablist" aria-label="选择新设备系统">
-                <button type="button" role="tab" data-device-platform="windows">Windows</button>
-                <button type="button" role="tab" data-device-platform="unix">Linux / macOS</button>
-                <button type="button" role="tab" data-device-platform="manual">已下载采集器</button>
+              <div class="device-create-row">
+                <label><span>设备名称</span><input id="newDeviceName" autocomplete="off" placeholder="例如：办公室电脑" maxlength="120" /></label>
+                <button class="filled-button" id="createDeviceButton" type="button">添加设备</button>
               </div>
-              <label class="device-command-label">
-                <span>一次性安装命令</span>
-                <textarea id="deviceCommandOutput" rows="5" readonly spellcheck="false"></textarea>
-              </label>
-              <div class="device-onboarding-actions">
-                <button class="filled-button" id="copyDeviceCommandButton" type="button">复制安装命令</button>
-                <span id="deviceOnboardingStatus" role="status" aria-live="polite">尚未检测到新设备</span>
+
+              <div class="device-onboarding" id="deviceCommandField" hidden>
+                <div class="device-onboarding-head">
+                  <div><span class="status-badge success" id="deviceOnboardingBadge">等待安装</span><strong id="deviceOnboardingTitle">在新设备运行一条命令</strong></div>
+                  <button class="icon-button quiet" id="closeDeviceCommandButton" type="button" aria-label="关闭接入命令">×</button>
+                </div>
+                <ol class="device-onboarding-steps">
+                  <li>新设备先安装 <strong>Node.js 22+</strong></li>
+                  <li>选择系统，复制并运行下面的命令</li>
+                  <li>页面会自动等待并确认首次同步</li>
+                </ol>
+                <div class="device-platform-tabs" role="tablist" aria-label="选择新设备系统">
+                  <button type="button" role="tab" data-device-platform="windows">Windows</button>
+                  <button type="button" role="tab" data-device-platform="unix">Linux / macOS</button>
+                  <button type="button" role="tab" data-device-platform="manual">已下载采集器</button>
+                </div>
+                <label class="device-command-label"><span>一次性安装命令</span><textarea id="deviceCommandOutput" rows="5" readonly spellcheck="false"></textarea></label>
+                <div class="device-onboarding-actions">
+                  <button class="filled-button" id="copyDeviceCommandButton" type="button">复制安装命令</button>
+                  <span id="deviceOnboardingStatus" role="status" aria-live="polite">尚未检测到新设备</span>
+                </div>
+                <small>命令会完成下载、首次导入和自动运行配置。设备令牌只显示在本次命令中。</small>
               </div>
-              <small>命令会完成下载、首次导入和自动运行配置。设备令牌只显示在本次命令中。</small>
-            </div>
 
-            <div class="device-settings-list" id="deviceSettingsList"></div>
-            <small class="device-privacy-note">只上传哈希化线程标识、时间、模型、平台版本和 Token；不上传标题、目录、提示词、回复或代码。</small>
-          </section>
-
-          <section>
-            <h3>外观</h3>
-            <div class="form-grid">
-              <label>
-                <span>强调色</span>
-                <input name="appearance.accentColor" type="color" />
-              </label>
-              <label>
-                <span>密度</span>
-                <select name="appearance.density">
-                  <option value="comfortable">舒适</option>
-                  <option value="compact">紧凑</option>
-                  <option value="roomy">宽松</option>
-                </select>
-              </label>
-              <label class="check-row">
-                <input name="appearance.reduceMotion" type="checkbox" />
-                <span>减少动态效果</span>
-              </label>
-            </div>
+              <div class="device-settings-list" id="deviceSettingsList" aria-live="polite"></div>
+              <small class="device-privacy-note">只上传哈希化线程标识、时间、模型、平台版本和 Token；不上传标题、目录、提示词、回复或代码。</small>
+            </section>
           </section>
         </div>
 

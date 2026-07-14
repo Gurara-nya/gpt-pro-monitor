@@ -11,6 +11,7 @@ const { querySessions } = require("./lib/session-query");
 const { usageWindows, withUsageWindows } = require("./lib/quota-windows");
 const { readRolloutTelemetry, threadHash: hashThreadId } = require("./lib/codex-telemetry");
 const { DeviceRegistry } = require("./lib/device-registry");
+const { deduplicateLineageRecords } = require("./lib/token-lineage");
 const {
   OFFICIAL_PRICING_USD_PER_MILLION,
   PRICE_CATALOG_VERSION,
@@ -710,7 +711,7 @@ function codexUsageConfigKey(user) {
   const adminPasswordPath = sub2api.adminPasswordPath ? resolveUserPath(sub2api.adminPasswordPath, "") : "";
   const deviceDir = path.join(codexUsageUserDir(user.id), "devices");
   return JSON.stringify({
-    reportSchema: "event-telemetry-v2",
+    reportSchema: "event-telemetry-v3-lineage",
     userId: user.id,
     codexUsage: {
       enabled: usageConfig.enabled !== false,
@@ -939,19 +940,49 @@ function attachUsageUser(result, user) {
   };
 }
 
+function compactDeviceDailyByMonth(report, requestedDevice = "all") {
+  const devices = Array.isArray(report?.device_breakdown) ? report.device_breakdown : [];
+  const selected = requestedDevice !== "all" && devices.some((device) => device.id === requestedDevice)
+    ? devices.filter((device) => device.id === requestedDevice)
+    : devices.filter((device) => device.enabled !== false && !device.revoked);
+  const months = new Set((report?.month_views || []).map((view) => view.month).filter(Boolean));
+  for (const device of selected) {
+    for (const view of report?.device_views?.[device.id]?.month_views || []) months.add(view.month);
+  }
+  return Object.fromEntries([...months].sort().map((month) => [
+    month,
+    selected.map((device) => {
+      const monthView = (report?.device_views?.[device.id]?.month_views || [])
+        .find((view) => view.month === month);
+      return {
+        id: device.id,
+        name: device.name || device.id,
+        stale: Boolean(device.stale),
+        points: (monthView?.days || []).map((day) => ({
+          day: day.day,
+          tokens: nonnegativeInteger(day.tokens)
+        }))
+      };
+    })
+  ]));
+}
+
 function publicCodexUsageState(result, deviceId = "all") {
   if (!result || typeof result !== "object") return result;
   if (!result.report || typeof result.report !== "object") return result;
   const requestedDevice = cleanString(deviceId || "all", "all", 120);
   const selectedView = requestedDevice !== "all" ? result.report.device_views?.[requestedDevice] : null;
+  const deviceDailyByMonth = compactDeviceDailyByMonth(result.report, selectedView ? requestedDevice : "all");
   const report = selectedView ? {
     ...result.report,
     ...selectedView,
     summary: { ...result.report.summary, ...selectedView.summary },
-    selected_device_id: requestedDevice
-  } : { ...result.report, selected_device_id: "all" };
+    selected_device_id: requestedDevice,
+    device_daily_by_month: deviceDailyByMonth
+  } : { ...result.report, selected_device_id: "all", device_daily_by_month: deviceDailyByMonth };
   delete report.sessions;
   delete report.device_views;
+  delete report.daily_top;
   return {
     ...result,
     report
@@ -1098,23 +1129,32 @@ async function loadCodexTokenUsageDetails(usageConfig) {
     byThreadId.set(record.threadId, previous ? mergeCodexTelemetryRecords(previous, record) : record);
   }
 
-  const records = [...byThreadId.values()];
-  for (const record of records) {
+  const rawRecords = [...byThreadId.values()];
+  for (const record of rawRecords) {
     const indexed = sessionIndex.get(record.threadId);
     if (!indexed) continue;
     record.title = record.title || indexed.title;
     record.updatedAt = record.updatedAt || indexed.updatedAt;
   }
+  const lineage = deduplicateLineageRecords(rawRecords, { inferUnlinked: true });
+  const records = lineage.records.map((record) => ({
+    ...record,
+    tokens: record.usageSplit.total_tokens,
+    rawTokens: record.rawUsageSplit.total_tokens
+  }));
   const indexes = buildCodexUsageIndexes(records);
   return {
     records,
-    byThreadId,
+    byThreadId: new Map(records.map((record) => [record.threadId, record])),
     ...indexes,
+    lineageAudit: lineage.audit,
     pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides),
     coverage: {
       source: "rollout_jsonl_token_count",
       session_files: files.length,
       split_threads: records.length,
+      raw_split_tokens: lineage.audit.rawTelemetryTokens,
+      inherited_tokens_excluded: lineage.audit.inheritedTokens,
       split_tokens: indexes.total.usageSplit.total_tokens,
       input_tokens: indexes.total.usageSplit.input_tokens,
       cached_input_tokens: indexes.total.usageSplit.cached_input_tokens,
@@ -1137,7 +1177,9 @@ function reconcileCodexUsageDetails(report, usageDetails) {
     if (!threadId) continue;
     seen.add(threadId);
     const exact = exactByThreadId.get(threadId);
-    const sqliteTokens = nonnegativeInteger(session.tokens);
+    const rawSqliteTokens = nonnegativeInteger(session.tokens);
+    const inheritedTokens = Math.min(rawSqliteTokens, nonnegativeInteger(exact?.inheritedTokens));
+    const sqliteTokens = Math.max(0, rawSqliteTokens - inheritedTokens);
     const rawEvents = Array.isArray(exact?.events) ? exact.events : [];
     const events = capTelemetryEvents(rawEvents, sqliteTokens).map((event) => ({
       ...event,
@@ -1198,6 +1240,11 @@ function reconcileCodexUsageDetails(report, usageDetails) {
       day: createdParts?.day || "",
       month: createdParts?.day ? createdParts.day.slice(0, 7) : "",
       sqliteTokens,
+      rawSqliteTokens,
+      inheritedTokens,
+      sharedPrefixEvents: nonnegativeInteger(exact?.sharedPrefixEvents),
+      forkParentThreadId: exact?.forkParentThreadId || exact?.parentThreadId || "",
+      forkMatchKind: exact?.forkMatchKind || "none",
       exactTokens,
       estimatedTokens,
       tokens: sqliteTokens,
@@ -1224,6 +1271,33 @@ function reconcileCodexUsageDetails(report, usageDetails) {
     sqlite_control_adjustment_tokens: [...reconciledByThreadId.values()]
       .reduce((sum, record) => sum + Math.max(0, nonnegativeInteger(record.rawExactTokens) - nonnegativeInteger(record.exactTokens)), 0)
   };
+  const rawSqliteTokens = [...reconciledByThreadId.values()]
+    .reduce((sum, record) => sum + nonnegativeInteger(record.rawSqliteTokens), 0);
+  const netTokens = [...reconciledByThreadId.values()]
+    .reduce((sum, record) => sum + nonnegativeInteger(record.sqliteTokens), 0);
+  const sharedHistoryTokens = Math.max(0, rawSqliteTokens - netTokens);
+  const lineageAudit = usageDetails.lineageAudit || {};
+  report.token_audit = {
+    raw_sqlite_tokens: rawSqliteTokens,
+    net_tokens: netTokens,
+    shared_history_tokens_excluded: sharedHistoryTokens,
+    shared_history_percent: rawSqliteTokens ? Math.round(sharedHistoryTokens / rawSqliteTokens * 10000) / 100 : 0,
+    fork_threads: nonnegativeInteger(lineageAudit.matchedForks),
+    explicit_fork_threads: nonnegativeInteger(lineageAudit.explicitMatches),
+    inferred_fork_threads: nonnegativeInteger(lineageAudit.inferredMatches),
+    unresolved_fork_threads: nonnegativeInteger(lineageAudit.missingParents) +
+      nonnegativeInteger(lineageAudit.noSharedPrefix) + nonnegativeInteger(lineageAudit.cyclicParents),
+    shared_prefix_events: nonnegativeInteger(lineageAudit.sharedPrefixEvents),
+    split_invariants_ok: tokenSplitInvariantsOk(distributionRecords),
+    message: sharedHistoryTokens
+      ? `已从 ${lineageAudit.matchedForks || 0} 个 fork/分支中排除继承的共享历史`
+      : "未检测到重复的 fork 共享历史"
+  };
+  Object.assign(coverage, {
+    raw_sqlite_tokens: rawSqliteTokens,
+    shared_history_tokens_excluded: sharedHistoryTokens,
+    effective_sqlite_tokens: netTokens
+  });
   const reconciled = {
     ...usageDetails,
     coverage,
@@ -1306,7 +1380,13 @@ function syncReportRows(rows, index, keyField, keyNormalizer, totalTokens) {
 
 function applyCanonicalTokenDistributions(report, usageDetails) {
   if (!report?.summary || !usageDetails?.total) return;
-  const totalTokens = nonnegativeInteger(report.summary.total_tokens);
+  const totalTokens = nonnegativeInteger(usageDetails.total.usageSplit?.total_tokens);
+  report.summary.total_tokens = totalTokens;
+  report.summary.total_tokens_display = formatCompactTokensForReport(totalTokens);
+  report.summary.total_tokens_full = formatIntegerForReport(totalTokens);
+  report.summary.avg_tokens = report.summary.threads ? Math.round(totalTokens / report.summary.threads) : 0;
+  report.summary.avg_tokens_display = formatCompactTokensForReport(report.summary.avg_tokens);
+  report.summary.usage_split = usageSplitPayload(usageDetails.total.usageSplit);
   report.models = syncReportRows(report.models, usageDetails.byModel, "model", normalizeModelKey, totalTokens);
   report.sources = syncReportRows(report.sources, usageDetails.bySource, "source", (value) => String(value || ""), totalTokens);
   report.daily = syncReportRows(report.daily, usageDetails.byDay, "day", (value) => String(value || ""), totalTokens)
@@ -1350,6 +1430,9 @@ function mergeCodexTelemetryRecords(left, right) {
     ...earliest,
     ...latest,
     filePath: latest.filePath,
+    parentThreadId: latest.parentThreadId || earliest.parentThreadId || "",
+    forkedFromId: latest.forkedFromId || earliest.forkedFromId || "",
+    threadSource: latest.threadSource || earliest.threadSource || "",
     createdAt: earliest.createdAt || latest.createdAt,
     day: earliest.day || latest.day,
     month: earliest.month || latest.month,
@@ -1442,7 +1525,7 @@ function normalizeTokenUsage(value) {
     reasoning_output_tokens: nonnegativeInteger(value.reasoning_output_tokens),
     total_tokens: nonnegativeInteger(value.total_tokens)
   };
-  if (!usage.total_tokens && (usage.input_tokens || usage.output_tokens)) {
+  if (usage.input_tokens || usage.output_tokens) {
     usage.total_tokens = usage.input_tokens + usage.output_tokens;
   }
   return usage.total_tokens ? usage : null;
@@ -1457,7 +1540,7 @@ function buildCodexUsageIndexes(records) {
     bySource: new Map()
   };
   for (const record of records) {
-    const telemetryEvents = Array.isArray(record.events) && record.events.length ? record.events : [record];
+    const telemetryEvents = Array.isArray(record.events) ? record.events : [record];
     for (const event of telemetryEvents) {
       const indexed = {
         ...event,
@@ -1550,6 +1633,24 @@ function nonnegativeInteger(value) {
   return Math.round(number);
 }
 
+function tokenSplitInvariantsOk(records) {
+  return (records || []).every((record) => {
+    const split = record?.usageSplit || record?.usage || {};
+    const values = [
+      split.input_tokens,
+      split.cached_input_tokens,
+      split.output_tokens,
+      split.reasoning_output_tokens,
+      split.total_tokens
+    ].map((value) => Number(value));
+    if (values.some((value) => !Number.isFinite(value) || value < 0)) return false;
+    const [input, cached, output, reasoning, total] = values;
+    if (cached > input || reasoning > output) return false;
+    if (record?.estimated && !input && !output) return true;
+    return total === input + output;
+  });
+}
+
 function enrichCodexUsageCosts(report, usageDetails = null) {
   if (!report || typeof report !== "object") return report;
   const splitCoverage = codexUsageSplitCoverage(usageDetails, report.summary?.total_tokens);
@@ -1586,28 +1687,203 @@ function enrichReportWithCodexSessions(report, usageDetails = null) {
   return report;
 }
 
+function canonicalThreadHash(value) {
+  const normalized = cleanString(value, "", 256);
+  return /^[a-f0-9]{64}$/i.test(normalized) ? normalized.toLowerCase() : hashThreadId(normalized);
+}
+
+function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecords, pricingOverrides, devices) {
+  const snapshotByThread = new Map();
+  for (const snapshot of snapshots || []) {
+    const previous = snapshotByThread.get(snapshot.threadHash);
+    if (!previous || snapshot.totalTokens > previous.totalTokens ||
+      (snapshot.totalTokens === previous.totalTokens && snapshot.updatedAt > previous.updatedAt)) {
+      snapshotByThread.set(snapshot.threadHash, snapshot);
+    }
+  }
+
+  const groups = new Map();
+  const ensureGroup = (threadId) => {
+    if (!groups.has(threadId)) groups.set(threadId, {
+      threadId,
+      parentThreadId: "",
+      createdAt: "",
+      events: [],
+      hasRemote: false,
+      localForkMatchKind: "none"
+    });
+    return groups.get(threadId);
+  };
+
+  for (const session of localSessionRecords || []) {
+    const threadId = session.threadHash || canonicalThreadHash(session.threadId);
+    if (!threadId) continue;
+    const group = ensureGroup(threadId);
+    group.createdAt ||= session.createdAt || session.rawEvents?.[0]?.at || session.events?.[0]?.at || "";
+    if (!group.parentThreadId && (session.parentThreadId || session.forkParentThreadId)) {
+      group.parentThreadId = canonicalThreadHash(session.parentThreadId || session.forkParentThreadId);
+    }
+    group.localForkMatchKind = session.forkMatchKind || group.localForkMatchKind;
+    const events = Array.isArray(session.rawEvents) ? session.rawEvents : session.events;
+    for (const event of events || []) group.events.push({ ...event, deviceId: "local", referenceOnly: true });
+  }
+
+  for (const record of remoteRecords || []) {
+    const group = ensureGroup(record.threadHash);
+    group.hasRemote = true;
+    group.createdAt ||= record.at || "";
+    group.parentThreadId ||= record.parentThreadHash || "";
+    group.events.push(record);
+  }
+
+  for (const snapshot of snapshots || []) {
+    if (!snapshot?.threadHash || snapshot.deviceId === "local") continue;
+    const group = ensureGroup(snapshot.threadHash);
+    group.hasRemote = true;
+    group.createdAt ||= snapshot.updatedAt || "";
+    group.parentThreadId ||= snapshot.parentThreadHash || "";
+  }
+
+  const lineageInput = [...groups.values()]
+    .filter((group) => group.events.length || snapshotByThread.has(group.threadId))
+    .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))
+    .map((group) => {
+      const snapshot = snapshotByThread.get(group.threadId);
+      const keyed = new Map();
+      const unkeyed = [];
+      for (const event of group.events) {
+        const eventId = cleanString(event?.eventId, "", 128);
+        if (!eventId) {
+          unkeyed.push(event);
+          continue;
+        }
+        const previous = keyed.get(eventId);
+        if (!previous || (!event.referenceOnly && previous.referenceOnly)) keyed.set(eventId, event);
+      }
+      const events = [...keyed.values(), ...unkeyed].sort((left, right) => {
+        const leftTotal = nonnegativeInteger(left?.cumulativeTotalTokens ?? left?.cumulativeUsage?.total_tokens);
+        const rightTotal = nonnegativeInteger(right?.cumulativeTotalTokens ?? right?.cumulativeUsage?.total_tokens);
+        if (leftTotal && rightTotal && leftTotal !== rightTotal) return leftTotal - rightTotal;
+        const leftTime = new Date(left?.at || "").getTime();
+        const rightTime = new Date(right?.at || "").getTime();
+        if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+        const leftOrder = Number.isFinite(Number(left?.registryOrder)) ? Number(left.registryOrder) : Number.MAX_SAFE_INTEGER;
+        const rightOrder = Number.isFinite(Number(right?.registryOrder)) ? Number(right.registryOrder) : Number.MAX_SAFE_INTEGER;
+        return leftOrder - rightOrder;
+      });
+      return {
+        ...group,
+        events,
+        parentThreadId: group.parentThreadId || snapshot?.parentThreadHash || "",
+        ...(snapshot ? { sqliteTokens: snapshot.totalTokens } : {})
+      };
+    });
+  const lineage = deduplicateLineageRecords(lineageInput, { inferUnlinked: true });
+  const records = [];
+  let sharedHistoryTokens = 0;
+  let sharedHistoryEvents = 0;
+  let explicitForkThreads = 0;
+  let inferredForkThreads = 0;
+  let unresolvedForkThreads = 0;
+
+  for (const thread of lineage.records) {
+    const original = groups.get(thread.threadId);
+    if (!original?.hasRemote) continue;
+    const removed = thread.rawEvents.slice(0, thread.sharedPrefixEvents)
+      .filter((event) => event.deviceId && event.deviceId !== "local");
+    for (const event of removed) sharedHistoryTokens += nonnegativeInteger(event.usageSplit?.total_tokens);
+    sharedHistoryEvents += removed.length;
+    const countedLocally = original.localForkMatchKind && original.localForkMatchKind !== "none";
+    if (!countedLocally && thread.forkMatchKind === "explicit_parent") explicitForkThreads += 1;
+    else if (!countedLocally && thread.forkMatchKind === "inferred_exact_prefix") inferredForkThreads += 1;
+    else if (!countedLocally && thread.forkMatchKind.startsWith("explicit_parent_")) unresolvedForkThreads += 1;
+
+    const keptRemote = thread.events.filter((event) => event.deviceId && event.deviceId !== "local");
+    records.push(...keptRemote);
+    const snapshot = snapshotByThread.get(thread.threadId);
+    const exactAllTokens = nonnegativeInteger(thread.usageSplit?.total_tokens);
+    const gap = snapshot ? Math.max(0, nonnegativeInteger(thread.branchTokens) - exactAllTokens) : 0;
+    if (!gap) continue;
+    const device = devices.get(snapshot.deviceId);
+    const day = localDateKey(new Date(snapshot.updatedAt));
+    records.push({
+      threadHash: thread.threadId,
+      threadId: thread.threadId,
+      parentThreadHash: thread.parentThreadId || "",
+      deviceId: snapshot.deviceId,
+      at: snapshot.updatedAt,
+      day,
+      month: day.slice(0, 7),
+      model: snapshot.model,
+      modelKey: normalizeModelKey(snapshot.model),
+      provider: snapshot.provider,
+      source: `device:${snapshot.deviceId}`,
+      sourceLabel: `设备 · ${device?.name || snapshot.deviceId}`,
+      tokens: gap,
+      estimated: true,
+      usageSplit: {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: gap
+      },
+      pricingOverrides
+    });
+  }
+
+  const rawTelemetryTokens = (remoteRecords || [])
+    .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+  const netTokens = records.reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+  return {
+    records,
+    audit: {
+      rawTelemetryTokens,
+      netTokens,
+      sharedHistoryTokens,
+      sharedHistoryEvents,
+      forkThreads: explicitForkThreads + inferredForkThreads,
+      explicitForkThreads,
+      inferredForkThreads,
+      unresolvedForkThreads
+    }
+  };
+}
+
 async function enrichReportWithDevices(report, usageDetails, user) {
   if (!report || !usageDetails) return report;
   const registry = deviceRegistry(user.id);
   const deviceData = await registry.data();
   const enabled = new Map(deviceData.devices.filter((device) => device.enabled && !device.revoked).map((device) => [device.id, device]));
-  const localRecords = (usageDetails.total?.records || []).map((record) => ({
+  const rawLocalRecords = (usageDetails.total?.records || []).map((record) => ({
     ...record,
     deviceId: "local",
     sourceLabel: record.sourceLabel || sourceLabel(record.source),
     pricingOverrides: usageDetails.pricingOverrides
   }));
-  const localEventIds = new Set(localRecords.map((record) => record.eventId).filter(Boolean));
-  const localThreadHashes = new Set(localRecords.map((record) => record.threadHash).filter(Boolean));
-  const remoteRecords = [];
+  const localEventIds = new Set(rawLocalRecords.map((record) => record.eventId).filter(Boolean));
+  for (const session of usageDetails.records || []) {
+    for (const event of session.rawEvents || []) {
+      if (event.eventId) localEventIds.add(event.eventId);
+    }
+  }
+  const eventOwnership = await registry.resolveOwnership(localEventIds);
+  const localRecords = rawLocalRecords.filter((record) =>
+    !record.eventId || (eventOwnership.get(record.eventId) || "local") === "local"
+  );
+  const remoteRawRecords = [];
 
-  for (const event of deviceData.events) {
-    if (!enabled.has(event.ownerDeviceId) || localEventIds.has(event.eventId)) continue;
+  for (const [registryOrder, event] of deviceData.events.entries()) {
+    if (!enabled.has(event.ownerDeviceId) || eventOwnership.get(event.eventId) !== event.ownerDeviceId) continue;
     const device = enabled.get(event.ownerDeviceId);
-    remoteRecords.push({
+    remoteRawRecords.push({
       eventId: event.eventId,
       threadHash: event.threadHash,
       threadId: event.threadHash,
+      parentThreadHash: event.parentThreadHash || "",
+      usageStateId: event.usageStateId || "",
+      cumulativeTotalTokens: nonnegativeInteger(event.cumulativeTotalTokens),
+      registryOrder,
       deviceId: event.ownerDeviceId,
       at: event.at,
       day: localDateKey(new Date(event.at)),
@@ -1622,56 +1898,20 @@ async function enrichReportWithDevices(report, usageDetails, user) {
     });
   }
 
-  const remoteByThread = new Map();
-  for (const record of remoteRecords) {
-    if (!remoteByThread.has(record.threadHash)) remoteByThread.set(record.threadHash, []);
-    remoteByThread.get(record.threadHash).push(record);
-  }
-  const snapshotsByThread = new Map();
-  for (const snapshot of deviceData.snapshots) {
-    if (!enabled.has(snapshot.deviceId) || localThreadHashes.has(snapshot.threadHash)) continue;
-    const previous = snapshotsByThread.get(snapshot.threadHash);
-    if (!previous || snapshot.totalTokens > previous.totalTokens ||
-      (snapshot.totalTokens === previous.totalTokens && snapshot.updatedAt > previous.updatedAt)) {
-      snapshotsByThread.set(snapshot.threadHash, snapshot);
-    }
-  }
-  for (const [threadHashValue, snapshot] of snapshotsByThread) {
-    const eventTokens = (remoteByThread.get(threadHashValue) || [])
-      .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
-    const gap = Math.max(0, nonnegativeInteger(snapshot.totalTokens) - eventTokens);
-    if (!gap) continue;
-    const device = enabled.get(snapshot.deviceId);
-    const day = localDateKey(new Date(snapshot.updatedAt));
-    const record = {
-      threadHash: threadHashValue,
-      threadId: threadHashValue,
-      deviceId: snapshot.deviceId,
-      at: snapshot.updatedAt,
-      day,
-      month: day.slice(0, 7),
-      model: snapshot.model,
-      modelKey: normalizeModelKey(snapshot.model),
-      provider: snapshot.provider,
-      source: `device:${snapshot.deviceId}`,
-      sourceLabel: `设备 · ${device.name}`,
-      tokens: gap,
-      estimated: true,
-      usageSplit: {
-        input_tokens: 0,
-        cached_input_tokens: 0,
-        output_tokens: 0,
-        reasoning_output_tokens: 0,
-        total_tokens: gap
-      },
-      pricingOverrides: usageDetails.pricingOverrides
-    };
-    remoteRecords.push(record);
-    if (!remoteByThread.has(threadHashValue)) remoteByThread.set(threadHashValue, []);
-    remoteByThread.get(threadHashValue).push(record);
-  }
+  const eligibleSnapshots = deviceData.snapshots.filter((snapshot) =>
+    snapshot.deviceId !== "local" && enabled.has(snapshot.deviceId)
+  );
+  const remoteReconciliation = reconcileRemoteDeviceUsage(
+    remoteRawRecords,
+    eligibleSnapshots,
+    usageDetails.records,
+    usageDetails.pricingOverrides,
+    enabled
+  );
+  const remoteRecords = remoteReconciliation.records;
 
-  const localSessions = (report.sessions || []).map((session) => ({ ...session, device_id: "local", device_name: enabled.get("local")?.name || os.hostname() }));
+  const localSessions = attributeLocalSessions(report.sessions || [], localRecords)
+    .map((session) => ({ ...session, device_id: "local", device_name: enabled.get("local")?.name || os.hostname() }));
   const remoteSessions = buildRemoteDeviceSessions(remoteRecords, enabled);
   const allRecords = [...localRecords, ...remoteRecords];
   const allSessions = [...localSessions, ...remoteSessions];
@@ -1710,6 +1950,34 @@ async function enrichReportWithDevices(report, usageDetails, user) {
       deviceBreakdownForPeriod(deviceData.devices, views, recordsByDevice, allView, monthView.month)
     ])
   );
+  const localAudit = report.token_audit || {};
+  const remoteAudit = remoteReconciliation.audit;
+  const combinedSharedHistory = nonnegativeInteger(localAudit.shared_history_tokens_excluded) +
+    nonnegativeInteger(remoteAudit.sharedHistoryTokens);
+  const combinedNetTokens = nonnegativeInteger(allView.summary.total_tokens);
+  const combinedRawTokens = combinedNetTokens + combinedSharedHistory;
+  report.token_audit = {
+    ...localAudit,
+    raw_sqlite_tokens: combinedRawTokens,
+    net_tokens: combinedNetTokens,
+    shared_history_tokens_excluded: combinedSharedHistory,
+    shared_history_percent: combinedRawTokens
+      ? Math.round(combinedSharedHistory / combinedRawTokens * 10000) / 100
+      : 0,
+    fork_threads: nonnegativeInteger(localAudit.fork_threads) + nonnegativeInteger(remoteAudit.forkThreads),
+    explicit_fork_threads: nonnegativeInteger(localAudit.explicit_fork_threads) +
+      nonnegativeInteger(remoteAudit.explicitForkThreads),
+    inferred_fork_threads: nonnegativeInteger(localAudit.inferred_fork_threads) +
+      nonnegativeInteger(remoteAudit.inferredForkThreads),
+    unresolved_fork_threads: nonnegativeInteger(localAudit.unresolved_fork_threads) +
+      nonnegativeInteger(remoteAudit.unresolvedForkThreads),
+    shared_prefix_events: nonnegativeInteger(localAudit.shared_prefix_events) +
+      nonnegativeInteger(remoteAudit.sharedHistoryEvents),
+    split_invariants_ok: tokenSplitInvariantsOk(allRecords),
+    message: combinedSharedHistory
+      ? `已排除 ${formatCompactTokensForReport(combinedSharedHistory)} fork/分支共享历史，统计仅保留各分支净新增`
+      : "未检测到重复的 fork/分支共享历史"
+  };
   const exactRecords = allRecords.filter((record) => !record.estimated);
   const exactUsage = createUsageGroup().usageSplit;
   for (const record of exactRecords) addUsageSplit(exactUsage, record.usageSplit);
@@ -1764,6 +2032,35 @@ function deviceBreakdownForPeriod(devices, views, recordsByDevice, allView, mont
       coverage_percent: total ? Math.round(Math.min(exact, total) / total * 10000) / 100 : 0,
       share_percent: allTokens ? Math.round(total / allTokens * 10000) / 100 : 0,
       cost_share_percent: allCost ? Math.round(deviceCost / allCost * 10000) / 100 : 0
+    };
+  });
+}
+
+function attributeLocalSessions(sessions, records) {
+  const byThreadId = new Map();
+  for (const record of records || []) {
+    const threadId = cleanString(record?.threadId, "", 160);
+    if (!threadId) continue;
+    if (!byThreadId.has(threadId)) byThreadId.set(threadId, []);
+    byThreadId.get(threadId).push(record);
+  }
+  return (sessions || []).map((session) => {
+    const rows = byThreadId.get(String(session?.id || "")) || [];
+    const usageSplit = createUsageGroup().usageSplit;
+    for (const row of rows) addUsageSplit(usageSplit, row.usageSplit);
+    const tokens = nonnegativeInteger(usageSplit.total_tokens);
+    return {
+      ...session,
+      tokens,
+      attributed_tokens: tokens,
+      tokens_display: formatCompactTokensForReport(tokens),
+      tokens_full: formatIntegerForReport(tokens),
+      usage_split: usageSplitPayload(usageSplit),
+      cost_estimate: aggregateSplitCost(rows),
+      exact_tokens: rows.filter((row) => !row.estimated)
+        .reduce((sum, row) => sum + nonnegativeInteger(row.usageSplit?.total_tokens), 0),
+      unparsed_tokens: rows.filter((row) => row.estimated)
+        .reduce((sum, row) => sum + nonnegativeInteger(row.usageSplit?.total_tokens), 0)
     };
   });
 }
@@ -1863,6 +2160,15 @@ function buildDeviceUsageView(records, sessions) {
     };
   });
   const totalCost = aggregateSplitCost(indexes.total.records);
+  const archivedSessions = sessions.filter((session) => session.archived === true);
+  const activeSessions = sessions.filter((session) => session.archived !== true);
+  const archivedTokens = archivedSessions.reduce((sum, session) => sum + nonnegativeInteger(session.tokens), 0);
+  const activeTokens = Math.max(0, totalTokens - archivedTokens);
+  const subagentTokens = sessions
+    .filter((session) => /subagent/i.test(String(session.source || "")) ||
+      /\u5b50\s*agent/i.test(String(session.source || "")))
+    .reduce((sum, session) => sum + nonnegativeInteger(session.tokens), 0);
+  const maxTokens = sessions.reduce((max, session) => Math.max(max, nonnegativeInteger(session.tokens)), 0);
   return {
     summary: {
       threads: sessions.length,
@@ -1872,6 +2178,23 @@ function buildDeviceUsageView(records, sessions) {
       total_tokens_full: formatIntegerForReport(totalTokens),
       avg_tokens: sessions.length ? Math.round(totalTokens / sessions.length) : 0,
       avg_tokens_display: formatCompactTokensForReport(sessions.length ? totalTokens / sessions.length : 0),
+      max_tokens: maxTokens,
+      max_tokens_display: formatCompactTokensForReport(maxTokens),
+      zero_threads: sessions.filter((session) => !nonnegativeInteger(session.tokens)).length,
+      active_threads: activeSessions.length,
+      archived_threads: archivedSessions.length,
+      active_tokens: activeTokens,
+      active_tokens_display: formatCompactTokensForReport(activeTokens),
+      archived_tokens: archivedTokens,
+      archived_tokens_display: formatCompactTokensForReport(archivedTokens),
+      active_share: totalTokens ? Math.round(activeTokens / totalTokens * 10000) / 100 : 0,
+      archived_share: totalTokens ? Math.round(archivedTokens / totalTokens * 10000) / 100 : 0,
+      subagent_tokens: subagentTokens,
+      subagent_tokens_display: formatCompactTokensForReport(subagentTokens),
+      subagent_share: totalTokens ? Math.round(subagentTokens / totalTokens * 10000) / 100 : 0,
+      monthly_spark: monthly.map((item) => Math.round(item.tokens / 10000) / 100),
+      avg_spark: monthViews.map((item) => Math.round(item.avg_tokens / 10000) / 100),
+      source_spark: sources.slice(0, 8).map((item) => Math.round(item.tokens / 10000) / 100),
       usage_split: usageSplitPayload(indexes.total.usageSplit),
       cost_estimate: totalCost
     },
@@ -1898,7 +2221,7 @@ function buildCodexSessionList(records, report) {
     const top = topById.get(id) || {};
     const usageSplit = usageSplitPayload({
       ...record.usageSplit,
-      total_tokens: record.sqliteTokens || record.tokens || record.usageSplit?.total_tokens
+      total_tokens: nonnegativeInteger(record.tokens ?? record.sqliteTokens ?? record.usageSplit?.total_tokens)
     });
     const model = String(record.model || top.model || "unknown");
     const costEstimate = aggregateSplitCost(record.costRecords || [record]);
@@ -1930,7 +2253,13 @@ function buildCodexSessionList(records, report) {
       cost_estimate: costEstimate,
       exact_tokens: nonnegativeInteger(record.exactTokens ?? record.usageSplit?.total_tokens),
       unparsed_tokens: nonnegativeInteger(record.estimatedTokens),
-      token_count_events: nonnegativeInteger(record.tokenCountEvents)
+      token_count_events: nonnegativeInteger(record.tokenCountEvents),
+      raw_tokens: nonnegativeInteger(record.rawSqliteTokens ?? record.rawTokens ?? record.tokens),
+      inherited_tokens: nonnegativeInteger(record.inheritedTokens),
+      shared_prefix_events: nonnegativeInteger(record.sharedPrefixEvents),
+      fork_parent_id: cleanString(record.forkParentThreadId, "", 160),
+      fork_match_kind: cleanString(record.forkMatchKind, "none", 64),
+      archived: Boolean(top.archived ?? record.archived)
     };
   }).sort((left, right) => {
     const tokenDelta = nonnegativeInteger(right.tokens) - nonnegativeInteger(left.tokens);
@@ -2826,7 +3155,7 @@ function annotateSessionCosts(items, usageDetails) {
     if (record) {
       item.usage_split = usageSplitPayload({
         ...record.usageSplit,
-        total_tokens: record.sqliteTokens || item.tokens || record.usageSplit?.total_tokens
+        total_tokens: nonnegativeInteger(record.sqliteTokens ?? item.tokens ?? record.usageSplit?.total_tokens)
       });
       item.cost_estimate = aggregateSplitCost(record.costRecords || [record]);
       item.exact_tokens = nonnegativeInteger(record.exactTokens ?? record.usageSplit?.total_tokens);
@@ -3001,8 +3330,18 @@ function formatCostEstimate(data) {
   const low = Math.min(data.low || 0, data.high || 0);
   const high = Math.max(data.low || 0, data.high || 0);
   const midpoint = data.midpoint ?? ((low + high) / 2);
-  const exact = Boolean(data.exact) || Math.abs(high - low) < 0.00005;
-  const display = exact ? formatUsd(midpoint) : `${formatUsd(low)}-${formatUsd(high)}`;
+  const pricedTokens = Math.max(0, Math.round(toNumber(data.pricedTokens, 0)));
+  const unpricedTokens = Math.max(0, Math.round(toNumber(data.unpricedTokens, 0)));
+  const estimatedTokens = Math.max(0, Math.round(toNumber(data.estimatedTokens, 0)));
+  const exact = Boolean(data.exact) && unpricedTokens === 0 && estimatedTokens === 0;
+  const singleValue = exact || Math.abs(high - low) < 0.00005;
+  const pricedDisplay = singleValue ? formatUsd(midpoint) : `${formatUsd(low)}-${formatUsd(high)}`;
+  const display = unpricedTokens > 0
+    ? (pricedTokens > 0 ? `${pricedDisplay} + 未定价` : "未定价")
+    : pricedDisplay;
+  const midpointDisplay = unpricedTokens > 0
+    ? (pricedTokens > 0 ? `${formatUsd(midpoint)} + 未定价` : "未定价")
+    : formatUsd(midpoint);
   return {
     model: data.model || "",
     rates: data.rates || null,
@@ -3015,10 +3354,10 @@ function formatCostEstimate(data) {
     midpoint_usd: roundCurrency(midpoint),
     range_display: display,
     display,
-    midpoint_display: formatUsd(midpoint),
-    priced_tokens: Math.max(0, Math.round(toNumber(data.pricedTokens, 0))),
-    unpriced_tokens: Math.max(0, Math.round(toNumber(data.unpricedTokens, 0))),
-    estimated_tokens: Math.max(0, Math.round(toNumber(data.estimatedTokens, 0))),
+    midpoint_display: midpointDisplay,
+    priced_tokens: pricedTokens,
+    unpriced_tokens: unpricedTokens,
+    estimated_tokens: estimatedTokens,
     exact,
     basis: data.basis || "estimated_total_tokens_range"
   };
@@ -3999,6 +4338,7 @@ if (require.main === module) {
 
 module.exports = {
   aggregateSplitCost,
+  attributeLocalSessions,
   capTelemetryEvents,
   codexUsageSplitCoverage,
   costEstimateForTokens,
@@ -4007,9 +4347,12 @@ module.exports = {
   deviceBreakdownForPeriod,
   normalizeConfig,
   computeStats,
+  compactDeviceDailyByMonth,
   runProbe,
   fetchCodexUsage,
   getCodexUsageState,
   generateCodexUsageHtmlReport,
-  mergeDeviceState
+  mergeDeviceState,
+  reconcileCodexUsageDetails,
+  reconcileRemoteDeviceUsage
 };

@@ -62,11 +62,20 @@ test("ingest is batch-idempotent and globally deduplicates copied rollouts", asy
   assert.equal(registered.agentInstalled, true);
   assert.equal(registered.lastAccepted, 1);
   assert.equal((await registry.ingest(first.token, batch("a", [copied]))).replay, true);
-  const duplicate = await registry.ingest(second.token, batch("b", [copied]));
+  const enrichedCopy = {
+    ...copied,
+    parentThreadHash: hash("parent"),
+    usageStateId: hash("8:2:2:1:10"),
+    cumulativeTotalTokens: 10
+  };
+  const duplicate = await registry.ingest(second.token, batch("b", [enrichedCopy]));
   assert.equal(duplicate.accepted, 0);
   assert.equal(duplicate.duplicates, 1);
   const stored = await registry.loadEvents();
   assert.equal(stored[0].ownerDeviceId, "laptop");
+  assert.equal(stored[0].parentThreadHash, hash("parent"));
+  assert.equal(stored[0].usageStateId, hash("8:2:2:1:10"));
+  assert.equal(stored[0].cumulativeTotalTokens, 10);
   assert.equal(stored[0].title, undefined);
   assert.equal(stored[0].cwd, undefined);
 });
@@ -77,6 +86,27 @@ test("out-of-order batches retain every unique event", async (t) => {
   await registry.ingest(device.token, batch("late", [event("late", "thread", 20, "2026-07-14T02:00:00Z")]));
   await registry.ingest(device.token, batch("early", [event("early", "thread", 10, "2026-07-14T01:00:00Z")]));
   assert.equal((await registry.loadEvents()).length, 2);
+});
+
+test("event ownership survives copies and preserves the initial local migration", async (t) => {
+  const registry = await registryFixture(t);
+  const device = await registry.create("Laptop");
+  const copied = event("copied");
+  const remoteOnly = event("remote-only");
+  const localOnly = event("local-only");
+  await registry.ingest(device.token, batch("initial", [copied, remoteOnly]));
+
+  const migrated = await registry.resolveOwnership([copied.eventId, localOnly.eventId]);
+  assert.equal(migrated.get(copied.eventId), "local");
+  assert.equal(migrated.get(localOnly.eventId), "local");
+  assert.equal(migrated.get(remoteOnly.eventId), "laptop");
+
+  const laterCopy = event("later-copy");
+  await registry.ingest(device.token, batch("later", [laterCopy]));
+  const resolved = await registry.resolveOwnership([copied.eventId, localOnly.eventId, laterCopy.eventId]);
+  assert.equal(resolved.get(copied.eventId), "local");
+  assert.equal(resolved.get(laterCopy.eventId), "laptop");
+  assert.equal((await registry.resolveOwnership([laterCopy.eventId])).get(laterCopy.eventId), "laptop");
 });
 
 test("token rotation invalidates the old token and revocation blocks ingest", async (t) => {

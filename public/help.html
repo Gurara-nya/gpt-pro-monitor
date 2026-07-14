@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>新设备接入 · GPT Pro Monitor</title>
+    <title>设备接入与数据审计 · GPT Pro Monitor</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="app.css" />
     <link rel="stylesheet" href="help.css" />
@@ -18,7 +18,7 @@
             <p>Remote telemetry</p>
             <div class="brand-meta">
               <span class="user-badge">GPT Pro Monitor</span>
-              <span class="status-badge success">接入帮助</span>
+              <span class="status-badge success">设备帮助</span>
             </div>
           </div>
         </div>
@@ -30,19 +30,21 @@
       <main class="help-main">
         <section class="help-hero">
           <p>One-command onboarding</p>
-          <h1>三步接入，一条命令</h1>
-          <p class="help-lead">管理员在 Monitor 创建设备，远程用户复制并运行对应系统的一条命令。安装、首次同步和自启动会自动完成。</p>
+          <h1>一条命令，自动接入</h1>
+          <p class="help-lead">新设备按三步完成接入；已有设备重新运行设置页生成的命令即可升级。安装、同步、自启动和后续更新都不需要克隆仓库或手工填写令牌。</p>
           <dl class="help-facts">
             <div><dt>当前 Monitor</dt><dd id="currentMonitorUrl">--</dd></div>
+            <div><dt>当前采集器</dt><dd>Agent 2.1</dd></div>
             <div><dt>自动同步</dt><dd>每 15 分钟</dd></div>
-            <div><dt>离线提示</dt><dd>45 分钟未同步</dd></div>
           </dl>
           <p class="callout warning transport-warning" id="transportWarning" hidden>当前公网入口不是 HTTPS，请先完成 HTTPS 配置，再向远程用户发送包含设备令牌的接入命令。</p>
         </section>
 
         <nav class="help-nav" aria-label="帮助目录">
           <a href="#quick">快速接入</a>
+          <a href="#upgrade">升级 2.1</a>
           <a href="#daily">日常操作</a>
+          <a href="#audit">统计口径</a>
           <a href="#privacy">数据边界</a>
           <a href="#troubleshooting">排障</a>
         </nav>
@@ -50,9 +52,9 @@
         <section class="help-section" id="quick">
           <div class="help-section-title"><span>01</span><div><p>Quick start</p><h2>新设备快速接入</h2></div></div>
           <ol class="quick-flow">
-            <li><span>1</span><div><strong>管理员创建设备</strong><p>进入 Monitor 的“设置 → 远程设备采集”，填写易识别的设备名称，点击“添加设备”。</p></div></li>
-            <li><span>2</span><div><strong>远程用户运行一条命令</strong><p>选择 Windows 或 Linux / macOS，复制命令并在远程电脑运行。需要提前安装 Node.js 22 或更高版本。</p></div></li>
-            <li><span>3</span><div><strong>等待在线确认</strong><p>首次历史较多时需要几分钟。设置面板会自动等待并显示“首次同步成功”，之后无需人工操作。</p></div></li>
+            <li><span>1</span><div><strong>添加设备</strong><p>进入“设置 → 设备”，填写一个容易识别的名称并点击“添加设备”。</p></div></li>
+            <li><span>2</span><div><strong>复制一键命令</strong><p>选择 Windows 或 Linux / macOS，把命令交给远程用户，并在运行 Codex 的同一系统账号下执行。需要 Node.js 22 或更高版本。</p></div></li>
+            <li><span>3</span><div><strong>等待在线</strong><p>命令会完成下载、首次同步和自启动。历史很多时多等几分钟，看到“首次同步成功”即可关闭终端。</p></div></li>
           </ol>
 
           <div class="result-strip" aria-label="命令自动完成的操作">
@@ -61,13 +63,35 @@
           <p class="callout"><strong>接入命令只显示一次。</strong>命令中包含该设备的专用令牌，请直接发给对应设备的使用者，不要发到群聊或公开工单。遗失时在设备卡片点“重新接入”即可生成新令牌，旧令牌会立即失效。</p>
         </section>
 
+        <section class="help-section help-section-accent" id="upgrade">
+          <div class="help-section-title"><span>02</span><div><p>Required update</p><h2>已有设备升级到 Agent 2.1</h2></div></div>
+          <div class="upgrade-layout">
+            <div>
+              <span class="version-chip">必须更新 · Agent 2.1</span>
+              <h3>重新运行设置页生成的一键命令</h3>
+              <ol class="compact-steps">
+                <li><span>1</span><p>在 Monitor 打开“设置 → 设备”，找到已有设备，点击<strong>“重新接入”</strong>。</p></li>
+                <li><span>2</span><p>选择远端系统，复制新的一键安装命令；旧令牌会立即失效。</p></li>
+                <li><span>3</span><p>在原设备、原系统用户下运行命令，等待首次同步完成。设置页会显示采集器版本和最近同步结果。</p></li>
+              </ol>
+            </div>
+            <aside class="upgrade-note">
+              <p>Why one full rescan?</p>
+              <h3>补齐 Fork 血缘信息</h3>
+              <p>2.1 升级后会<strong>完整重扫一次</strong>历史，用于补齐父线程哈希和累计 Token 状态，从而识别 Fork、新分支和子任务继承的共享历史。</p>
+              <p>这次重扫是幂等的，不会把同一事件重复计量。完成后继续按文件偏移增量读取，每 15 分钟同步一次，不会反复扫描全部历史。</p>
+            </aside>
+          </div>
+          <p class="callout"><strong>不要复制或手工修改令牌。</strong>每台设备都应使用自己设备卡生成的命令。升级、换机或怀疑令牌泄露时，都使用“重新接入”生成新命令。</p>
+        </section>
+
         <section class="help-section" id="daily">
-          <div class="help-section-title"><span>02</span><div><p>Daily operations</p><h2>安装后通常无需操作</h2></div></div>
+          <div class="help-section-title"><span>03</span><div><p>Daily operations</p><h2>安装后通常无需操作</h2></div></div>
           <div class="operation-grid">
             <article>
               <span class="operation-tag">自动</span>
               <h3>持续更新</h3>
-              <p>采集器每 15 分钟增量同步；失败后会按 1、5、15 分钟自动重试。首次扫描完整历史，之后只读取新增数据。</p>
+              <p>采集器每 15 分钟增量同步；失败后会按 1、5、15 分钟自动重试。连续 45 分钟没有成功同步时，Monitor 会提示数据过期。</p>
             </article>
             <article>
               <span class="operation-tag">检查</span>
@@ -80,6 +104,11 @@
               <h3>手动同步一次</h3>
               <p>无需等待下一次自动同步。</p>
               <div class="mini-command"><code id="syncCommand">node "$HOME/.gpt-monitor/device-agent.js" --once</code><button type="button" data-copy-target="syncCommand">复制</button></div>
+            </article>
+            <article>
+              <span class="operation-tag">更新</span>
+              <h3>升级或重新安装</h3>
+              <p>在设备卡点击“重新接入”，再运行新命令。它会更新采集器、令牌和自启动配置，不需要先卸载。</p>
             </article>
             <article>
               <span class="operation-tag">移除</span>
@@ -104,22 +133,43 @@
           </details>
         </section>
 
+        <section class="help-section" id="audit">
+          <div class="help-section-title"><span>04</span><div><p>Token accounting</p><h2>Fork 只统计分叉后新增用量</h2></div></div>
+          <p class="section-intro">Fork、新分支和子任务会继承父会话的累计 Token 历史。Monitor 会识别这段共享前缀并扣除，只把分叉后真正新增的输入、缓存输入和输出计入日报、设备占比与 API 等价成本。</p>
+          <div class="audit-formula" aria-label="Token 净用量计算方法">
+            <article><span>01 · 原始</span><strong>原始 Token</strong><p>SQLite 与 telemetry 记录的线程累计总量，尚未处理继承历史。</p></article>
+            <i aria-hidden="true">−</i>
+            <article><span>02 · 扣除</span><strong>共享历史</strong><p>父线程与 Fork 完全一致的累计状态前缀，不属于新分支的新增消耗。</p></article>
+            <i aria-hidden="true">=</i>
+            <article class="audit-net"><span>03 · 计入</span><strong>净 Token</strong><p>原始 Token 减去共享历史；仪表盘的趋势、设备占比和成本统一使用该值。</p></article>
+          </div>
+          <div class="audit-guidance">
+            <article><h3>在哪里核对</h3><p>在消耗仪表盘的“数据审计”区域查看<strong>原始 Token、已扣除共享历史、净 Token</strong>和 Fork 线程数。三者应满足：净值 = 原始值 − 扣除值。</p></article>
+            <article><h3>分叉后的新消耗会保留</h3><p>仅扣除父子线程完全一致的历史前缀。Fork 之后产生的新累计状态仍归入实际发生日期和对应设备，不会整条会话忽略。</p></article>
+            <article><h3>旧设备为何必须更新</h3><p>旧采集数据可能缺少父线程血缘。Agent 2.1 的一次性完整重扫会补齐这些字段，让远端设备与本机使用同一套净用量口径。</p></article>
+            <article><h3>设备归属如何确定</h3><p>升级时保留已有本机归属；之后新事件固定归给中心首次观察到它的设备。复制同一 rollout 不会改变既有设备占比，跨设备继续产生的新状态则归新设备。</p></article>
+          </div>
+          <p class="callout"><strong>日量仍异常高时：</strong>先确认所有远端设备均为 Agent 2.1 且已完成一次完整同步，再刷新用量缓存，并对照数据审计区的原始、扣除与净值。</p>
+        </section>
+
         <section class="help-section" id="privacy">
-          <div class="help-section-title"><span>03</span><div><p>Privacy boundary</p><h2>只同步用量，不同步内容</h2></div></div>
+          <div class="help-section-title"><span>05</span><div><p>Privacy boundary</p><h2>只同步用量，不同步内容</h2></div></div>
           <div class="privacy-grid">
-            <article><h3>会上传</h3><ul><li>设备 ID、采集器版本、操作系统和同步状态</li><li>不可逆线程哈希与事件哈希</li><li>事件时间、模型和提供方</li><li>输入、缓存输入、输出、推理输出 Token</li><li>SQLite 线程 Token 总量快照</li></ul></article>
+            <article><h3>会上传</h3><ul><li>设备 ID、采集器版本、操作系统和同步状态</li><li>不可逆线程哈希、父线程哈希与事件哈希</li><li>事件时间、模型和提供方</li><li>输入、缓存输入、输出、推理输出及累计 Token 状态</li><li>SQLite 线程 Token 总量快照</li></ul></article>
             <article><h3>不会上传</h3><ul><li>提示词和回复正文</li><li>代码内容</li><li>会话标题</li><li>工作目录和文件路径</li><li>Monitor 登录密码或浏览器凭据</li></ul></article>
           </div>
         </section>
 
         <section class="help-section" id="troubleshooting">
-          <div class="help-section-title"><span>04</span><div><p>Diagnostics</p><h2>遇到问题先看这里</h2></div></div>
+          <div class="help-section-title"><span>06</span><div><p>Diagnostics</p><h2>遇到问题先看这里</h2></div></div>
           <div class="trouble-list">
+            <details><summary>设备仍显示 Agent 2.0 或更早版本</summary><p>不能只运行 <code>--once</code> 更新程序。请在 Monitor 的设备卡点击“重新接入”，复制并运行新命令；看到 Agent 2.1 且首次完整同步完成后才算升级成功。</p></details>
             <details><summary>提示需要 Node.js 22</summary><p>在远程电脑安装 Node.js 22 或更高版本，关闭并重新打开终端，再运行原接入命令。用 <code>node --version</code> 可检查版本。</p></details>
             <details><summary>设备一直显示“等待首次同步”</summary><p>确认命令在运行 Codex 的同一系统用户下执行，并检查远程电脑能否访问上方的 Monitor 地址。首次历史较多时请等待几分钟。</p></details>
             <details><summary>设备显示“数据过期”</summary><p>在远程电脑运行上面的“查看本机状态”和“手动同步一次”。若返回 401，请在 Monitor 对该设备执行“重新接入”，再运行新命令。</p></details>
             <details><summary>更换电脑或令牌泄露</summary><p>在设备卡片点击“重新接入”。新命令生成后旧令牌立即失效；在新电脑运行新命令即可。</p></details>
             <details><summary>重复复制了同一份 Codex 历史</summary><p>服务端会按与设备无关的事件 ID 幂等去重，同一个 rollout 出现在多台设备时不会重复计量。</p></details>
+            <details><summary>Fork 后某一天的用量仍然很高</summary><p>先在“数据审计”核对共享历史扣除量。如果远端设备尚未升级，请先更新至 Agent 2.1 并等待完整重扫结束；随后在首页刷新用量，确认净 Token 已重新计算。</p></details>
           </div>
         </section>
       </main>

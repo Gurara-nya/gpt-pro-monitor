@@ -53,8 +53,28 @@ test("custom prices apply by model and effective date", () => {
   assert.equal(resolvePricing("gpt-5.6-luna", "2026-08-02", overrides).input, 3);
 });
 
+test("custom GPT-5.6 rates retain the official long-context multiplier", () => {
+  const overrides = [{
+    model: "gpt-5.6-terra",
+    input: 1,
+    cachedInput: 0.1,
+    output: 2,
+    effectiveDate: "2026-07-01"
+  }];
+  const cost = estimateSplitCost({
+    input_tokens: 300_000,
+    cached_input_tokens: 0,
+    output_tokens: 100_000,
+    total_tokens: 400_000
+  }, "gpt-5.6-terra", { overrides, at: "2026-07-14" });
+  assert.equal(cost.longContext, true);
+  assert.equal(cost.midpoint, 0.9);
+});
+
 test("total-only estimates return a range and unknown models stay unpriced", () => {
   const range = estimateTotalTokenRange(1_000_000, "gpt-5.6-terra");
-  assert.deepEqual([range.low, range.high], [0.25, 15]);
+  assert.equal(range.low, 0.25);
+  assert.ok(range.high > 17.7);
+  assert.equal(range.basis, "estimated_total_tokens_range_long_context");
   assert.equal(estimateTotalTokenRange(1000, "private-model"), null);
 });

@@ -48,6 +48,9 @@ async function main() {
     assert.equal(usage.report.device_views, undefined);
     assert.equal(Array.isArray(usage.report.device_breakdown), true);
     assert.equal(typeof usage.report.device_breakdown_by_month, "object");
+    assert.equal(typeof usage.report.device_daily_by_month, "object");
+    assert.equal(typeof usage.report.token_audit, "object");
+    assert.equal(typeof usage.report.token_audit.shared_history_tokens_excluded, "number");
     for (const month of usage.report.month_views || []) {
       assert.equal(Array.isArray(usage.report.device_breakdown_by_month[month.month]), true);
     }
@@ -89,14 +92,14 @@ async function main() {
       { headers: { Authorization: `Bearer ${smokeDevice.token}` } }
     );
     assert.equal(agentDownload.ok, true, `authenticated agent download returned ${agentDownload.status}`);
-    assert.equal(agentDownload.headers.get("x-gpt-monitor-agent-version"), "2.0.0");
-    assert.match(await agentDownload.text(), /AGENT_VERSION = "2\.0\.0"/);
+    assert.equal(agentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.0");
+    assert.match(await agentDownload.text(), /AGENT_VERSION = "2\.1\.0"/);
     const aliasAgentDownload = await fetch(
       `${new URL(baseUrl).origin}/monitor/api/device-agent/v1?userId=${encodeURIComponent(userId)}`,
       { cache: "no-store", headers: { Authorization: `Bearer ${smokeDevice.token}` } }
     );
     assert.equal(aliasAgentDownload.ok, true, `subpath agent download returned ${aliasAgentDownload.status}`);
-    assert.equal(aliasAgentDownload.headers.get("x-gpt-monitor-agent-version"), "2.0.0");
+    assert.equal(aliasAgentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.0");
     const rejectedDownload = await fetch(`${baseUrl}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`);
     assert.equal(rejectedDownload.status, 401);
     const ingestResponse = await fetch(`${baseUrl}/api/device-ingest/v1`, {
