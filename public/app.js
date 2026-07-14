@@ -39,6 +39,12 @@ const ICONS = {
 let state = null;
 let codexUsageState = null;
 let codexUsageMonth = "";
+let codexSessionQuery = "";
+let codexSessionMonth = "all";
+let codexSessionSort = "tokens_desc";
+let codexSessionVisible = 30;
+let selectedUsageUserId = localStorage.getItem("gpt-monitor-usage-user") || "";
+let settingsUsageUserId = "";
 let toastTimer = null;
 let historyViewMode = "week";
 let historyCursorDate = new Date();
@@ -47,27 +53,54 @@ let historyListExpanded = false;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const APP_BASE_PATH = detectAppBasePath();
 
 document.addEventListener("DOMContentLoaded", () => {
   wireEvents();
   refreshState({ quiet: true });
   refreshCodexUsage({ quiet: true });
   setInterval(() => refreshState({ quiet: true }), 30000);
-  setInterval(() => refreshCodexUsage({ quiet: true }), 5 * 60 * 1000);
 });
 
 function wireEvents() {
   $("#refreshButton").addEventListener("click", () => refreshUsage("manual"));
+  $("#usageUserSelect").addEventListener("change", (event) => selectUsageUser(event.target.value));
   $("#codexUsageRefreshButton").addEventListener("click", () => refreshCodexUsage({ force: true }));
   $("#codexUsageReportButton").addEventListener("click", generateCodexUsageReport);
   $("#codexMonthSelect").addEventListener("change", (event) => {
     codexUsageMonth = event.target.value;
     renderCodexUsage();
   });
+  $("#codexSessionSearch").addEventListener("input", (event) => {
+    codexSessionQuery = event.target.value;
+    codexSessionVisible = 30;
+    renderCodexUsage();
+  });
+  $("#codexSessionMonthFilter").addEventListener("change", (event) => {
+    codexSessionMonth = event.target.value;
+    codexSessionVisible = 30;
+    renderCodexUsage();
+  });
+  $("#codexSessionSort").addEventListener("change", (event) => {
+    codexSessionSort = event.target.value;
+    codexSessionVisible = 30;
+    renderCodexUsage();
+  });
+  $("#codexSessionMoreButton").addEventListener("click", () => {
+    codexSessionVisible += 30;
+    renderCodexUsage();
+  });
   $("#settingsButton").addEventListener("click", openSettings);
   $("#closeSettingsButton").addEventListener("click", closeSettings);
   $("#cancelSettingsButton").addEventListener("click", closeSettings);
   $("#settingsForm").addEventListener("submit", saveSettings);
+  $("#settingsUsageUserSelect").addEventListener("change", (event) => {
+    settingsUsageUserId = event.target.value;
+    fillUsageUserSettings(getUsageUserById(settingsUsageUserId));
+  });
+  $("#addUsageUserButton").addEventListener("click", addUsageUser);
+  $("#codexDbUploadButton").addEventListener("click", uploadCodexDb);
+  $("#sub2ApiKeySaveButton").addEventListener("click", saveSub2ApiKey);
   $("#clearButton").addEventListener("click", clearHistory);
   $("#exportButton").addEventListener("click", exportData);
   $("#prevPeriodButton").addEventListener("click", () => shiftHistoryPeriod(-1));
@@ -79,7 +112,7 @@ function wireEvents() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {})
@@ -91,9 +124,65 @@ async function api(path, options = {}) {
   return payload;
 }
 
+function detectAppBasePath() {
+  const script = document.currentScript || document.querySelector('script[src$="app.js"], script[src$="/app.js"]');
+  if (!script?.src) return "";
+  try {
+    const scriptUrl = new URL(script.src, window.location.href);
+    const path = scriptUrl.pathname.replace(/\/app\.js$/, "");
+    return path === "/" ? "" : path.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function appUrl(path) {
+  const value = String(path || "");
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith("//")) return value;
+  const normalized = value.startsWith("/") ? value : `/${value}`;
+  if (!APP_BASE_PATH || normalized === APP_BASE_PATH || normalized.startsWith(`${APP_BASE_PATH}/`)) {
+    return normalized;
+  }
+  return `${APP_BASE_PATH}${normalized}`;
+}
+
+function usageUsers() {
+  return Array.isArray(state?.config?.usageUsers) ? state.config.usageUsers : [];
+}
+
+function currentUsageUserId() {
+  const users = usageUsers();
+  if (users.some((user) => user.id === selectedUsageUserId)) return selectedUsageUserId;
+  return state?.config?.activeUsageUserId || users[0]?.id || "gurara";
+}
+
+function syncSelectedUsageUserFromState() {
+  const users = usageUsers();
+  if (!users.length) return;
+  if (!users.some((user) => user.id === selectedUsageUserId)) {
+    selectedUsageUserId = state.config.activeUsageUserId || users[0].id;
+    localStorage.setItem("gpt-monitor-usage-user", selectedUsageUserId);
+  }
+}
+
+function getUsageUserById(id) {
+  return usageUsers().find((user) => user.id === id) || usageUsers()[0] || null;
+}
+
+function selectUsageUser(userId) {
+  if (!usageUsers().some((user) => user.id === userId)) return;
+  selectedUsageUserId = userId;
+  localStorage.setItem("gpt-monitor-usage-user", selectedUsageUserId);
+  codexUsageMonth = "";
+  codexSessionMonth = "all";
+  codexSessionVisible = 30;
+  refreshCodexUsage({ quiet: true });
+}
+
 async function refreshState({ quiet = false } = {}) {
   try {
     state = await api("/api/state");
+    syncSelectedUsageUserFromState();
     render();
     if (!quiet) showToast("状态已同步");
   } catch (error) {
@@ -127,9 +216,14 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
     button.classList.add("spinning");
   }
   try {
-    codexUsageState = await api(force ? "/api/codex-usage/refresh" : "/api/codex-usage", {
-      method: force ? "POST" : "GET"
-    });
+    const userId = currentUsageUserId();
+    codexUsageState = await api(
+      force ? "/api/codex-usage/refresh" : `/api/codex-usage?userId=${encodeURIComponent(userId)}`,
+      {
+        method: force ? "POST" : "GET",
+        ...(force ? { body: JSON.stringify({ userId }) } : {})
+      }
+    );
     renderCodexUsage();
     if (!quiet) showToast(codexUsageState.message || "Token 数据已同步");
   } catch (error) {
@@ -159,11 +253,14 @@ async function generateCodexUsageReport() {
   }
   button.disabled = true;
   try {
-    const result = await api("/api/codex-usage/report", { method: "POST" });
+    const result = await api("/api/codex-usage/report", {
+      method: "POST",
+      body: JSON.stringify({ userId: currentUsageUserId() })
+    });
     if (result.status !== "ok") throw new Error(result.message || "报告生成失败");
     await refreshCodexUsage({ quiet: true });
-    if (reportWindow) reportWindow.location.href = result.reportUrl;
-    else window.location.href = result.reportUrl;
+    if (reportWindow) reportWindow.location.href = appUrl(result.reportUrl);
+    else window.location.href = appUrl(result.reportUrl);
     showToast("Token 报告已生成");
   } catch (error) {
     if (reportWindow) reportWindow.close();
@@ -222,12 +319,13 @@ function renderWindow(prefix, window) {
 }
 
 function renderCodexUsage() {
+  renderUsageUserSelect();
   const select = $("#codexMonthSelect");
   const status = codexUsageState?.status || "loading";
   const report = codexUsageState?.report || null;
   $("#codexUsageStatus").textContent = codexUsageStatusText(codexUsageState);
   $(".token-panel").dataset.status = status;
-  $("#codexUsageReportButton").disabled = !state?.config?.codexUsage?.enabled;
+  $("#codexUsageReportButton").disabled = !getUsageUserById(currentUsageUserId())?.codexUsage?.enabled;
 
   if (!report) {
     select.innerHTML = `<option>--</option>`;
@@ -239,6 +337,7 @@ function renderCodexUsage() {
     $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexTopSessions").innerHTML = `<div class="empty-state">${escapeHtml(codexUsageState?.message || "等待 Token 数据")}</div>`;
     $("#codexSessionCount").textContent = "默认收起";
+    renderCodexSessionManager(null);
     return;
   }
 
@@ -262,11 +361,69 @@ function renderCodexUsage() {
   );
   $("#codexCostNote").innerHTML = codexCostNote(report);
   $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
+  setupDailyScroller($("#codexDailyList .token-daily-scroll"));
   $("#codexSourceList").innerHTML = renderCodexBars(selectedView?.sources || report.sources || [], "source");
   $("#codexModelList").innerHTML = renderCodexBars(selectedView?.models || report.models || [], "model");
   const sessions = selectedView?.top_sessions || report.top_sessions || [];
   $("#codexSessionCount").textContent = `${sessions.length} 个 · 默认收起`;
   $("#codexTopSessions").innerHTML = renderCodexSessions(sessions);
+  renderCodexSessionManager(report);
+}
+
+function renderUsageUserSelect() {
+  const select = $("#usageUserSelect");
+  if (!select || !state) return;
+  const users = usageUsers();
+  selectedUsageUserId = currentUsageUserId();
+  select.innerHTML = users.length
+    ? users.map((user) => {
+        const selected = user.id === selectedUsageUserId ? " selected" : "";
+        return `<option value="${escapeAttr(user.id)}"${selected}>${escapeHtml(user.label || user.id)}</option>`;
+      }).join("")
+    : `<option value="gurara">Gurara</option>`;
+  select.value = selectedUsageUserId;
+}
+
+function setupDailyScroller(scroll) {
+  if (!scroll) return;
+  requestAnimationFrame(() => {
+    scroll.scrollLeft = scroll.scrollWidth - scroll.clientWidth;
+  });
+
+  scroll.addEventListener("wheel", (event) => {
+    if (scroll.scrollWidth <= scroll.clientWidth) return;
+    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+    event.preventDefault();
+    scroll.scrollLeft += event.deltaY;
+  }, { passive: false });
+
+  let isDragging = false;
+  let startX = 0;
+  let startScrollLeft = 0;
+  const finishDrag = (event) => {
+    if (!isDragging) return;
+    isDragging = false;
+    scroll.classList.remove("is-dragging");
+    if (scroll.hasPointerCapture?.(event.pointerId)) {
+      scroll.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  scroll.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || scroll.scrollWidth <= scroll.clientWidth) return;
+    isDragging = true;
+    startX = event.clientX;
+    startScrollLeft = scroll.scrollLeft;
+    scroll.classList.add("is-dragging");
+    scroll.setPointerCapture(event.pointerId);
+  });
+  scroll.addEventListener("pointermove", (event) => {
+    if (!isDragging) return;
+    scroll.scrollLeft = startScrollLeft - (event.clientX - startX);
+  });
+  scroll.addEventListener("pointerup", finishDrag);
+  scroll.addEventListener("pointercancel", finishDrag);
+  scroll.addEventListener("lostpointercapture", finishDrag);
 }
 
 function codexUsageStatusText(value) {
@@ -332,16 +489,18 @@ function findTodayUsage(days) {
 
 function renderCodexDaily(days) {
   const visible = (Array.isArray(days) ? days : [])
-    .filter((day) => Number(day.tokens) > 0)
-    .slice(-14);
+    .filter((day) => Number(day.tokens) > 0);
   if (!visible.length) return `<div class="empty-state">本月暂无日消耗数据</div>`;
-  const width = 960;
+  const axisWidth = 92;
+  const minWidth = 960;
   const height = 300;
-  const left = 64;
+  const left = 18;
   const right = 26;
   const top = 26;
   const bottom = 54;
-  const chartWidth = width - left - right;
+  const pointSpacing = 72;
+  const chartWidth = Math.max(minWidth - left - right, Math.max(1, visible.length - 1) * pointSpacing);
+  const width = left + chartWidth + right;
   const chartHeight = height - top - bottom;
   const baseY = top + chartHeight;
   const maxTokens = Math.max(...visible.map((day) => Number(day.tokens) || 0), 1);
@@ -355,16 +514,24 @@ function renderCodexDaily(days) {
   });
   const linePath = points.map((point, index) => `${index ? "L" : "M"} ${svgNumber(point.x)} ${svgNumber(point.y)}`).join(" ");
   const areaPath = `${linePath} L ${svgNumber(points.at(-1).x)} ${svgNumber(baseY)} L ${svgNumber(points[0].x)} ${svgNumber(baseY)} Z`;
-  const grid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
     const y = baseY - ratio * chartHeight;
     const value = Math.round(yMax * ratio);
+    return { y, value };
+  });
+  const grid = yTicks.map(({ y }) => {
     return `
       <g>
-        <line x1="${left}" y1="${svgNumber(y)}" x2="${width - right}" y2="${svgNumber(y)}"></line>
-        <text x="${left - 14}" y="${svgNumber(y + 4)}">${escapeHtml(formatCompactTokens(value))}</text>
+        <line x1="0" y1="${svgNumber(y)}" x2="${width - right}" y2="${svgNumber(y)}"></line>
       </g>
     `;
   }).join("");
+  const axis = yTicks.map(({ y, value }) => `
+    <g>
+      <line x1="${axisWidth - 8}" y1="${svgNumber(y)}" x2="${axisWidth}" y2="${svgNumber(y)}"></line>
+      <text x="${axisWidth - 12}" y="${svgNumber(y + 4)}">${escapeHtml(formatCompactTokens(value))}</text>
+    </g>
+  `).join("");
   const labelStep = Math.max(1, Math.ceil(visible.length / 7));
   const labels = points.map((point, index) => {
     if (index % labelStep !== 0 && index !== points.length - 1) return "";
@@ -378,23 +545,33 @@ function renderCodexDaily(days) {
   `).join("");
   const topDay = visible.reduce((best, day) => Number(day.tokens) > Number(best.tokens) ? day : best, visible[0]);
   const today = findTodayUsage(visible) || visible.at(-1);
-  const totalTokens = visible.reduce((sum, day) => sum + (Number(day.tokens) || 0), 0);
-  const totalLow = visible.reduce((sum, day) => sum + (Number(day.cost_estimate?.low_usd) || 0), 0);
-  const totalHigh = visible.reduce((sum, day) => sum + (Number(day.cost_estimate?.high_usd) || 0), 0);
+  const summaryDays = visible.slice(-14);
+  const totalTokens = summaryDays.reduce((sum, day) => sum + (Number(day.tokens) || 0), 0);
+  const totalLow = summaryDays.reduce((sum, day) => sum + (Number(day.cost_estimate?.low_usd) || 0), 0);
+  const totalHigh = summaryDays.reduce((sum, day) => sum + (Number(day.cost_estimate?.high_usd) || 0), 0);
 
   return `
     <div class="token-daily-chart">
-      <svg class="token-daily-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="每日 Token 消耗折线图">
-        <g class="token-daily-grid">${grid}</g>
-        <path class="token-daily-area" d="${escapeAttr(areaPath)}"></path>
-        <path class="token-daily-line" d="${escapeAttr(linePath)}"></path>
-        <g class="token-daily-markers">${markers}</g>
-        <g class="token-daily-labels">${labels}</g>
-      </svg>
+      <div class="token-daily-plot" style="--daily-axis-width:${axisWidth}px">
+        <div class="token-daily-axis-frame" aria-hidden="true">
+          <svg class="token-daily-axis" width="${axisWidth}" height="${height}" viewBox="0 0 ${axisWidth} ${height}" focusable="false">
+            <g class="token-daily-axis-grid">${axis}</g>
+          </svg>
+        </div>
+        <div class="token-daily-scroll" tabindex="0" role="region" aria-label="每日 Token 消耗时间轴">
+          <svg class="token-daily-svg" width="${width}" height="${height}" style="min-width:${width}px" viewBox="0 0 ${width} ${height}" role="img" aria-label="每日 Token 消耗折线图">
+            <g class="token-daily-grid">${grid}</g>
+            <path class="token-daily-area" d="${escapeAttr(areaPath)}"></path>
+            <path class="token-daily-line" d="${escapeAttr(linePath)}"></path>
+            <g class="token-daily-markers">${markers}</g>
+            <g class="token-daily-labels">${labels}</g>
+          </svg>
+        </div>
+      </div>
       <div class="token-daily-summary">
         ${dailySummaryItem("峰值", `${formatDayLabel(topDay.day)} · ${topDay.tokens_display || "--"}`, `${topDay.cost_estimate?.range_display || "--"} · ${formatUsageSplit(topDay.usage_split)}`)}
         ${dailySummaryItem("今日", `${formatDayLabel(today.day)} · ${today.tokens_display || "--"}`, `${today.cost_estimate?.range_display || "--"} · ${formatUsageSplit(today.usage_split)}`)}
-        ${dailySummaryItem("近 14 次", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${visible.length} 天`)}
+        ${dailySummaryItem("近 14 次", formatCompactTokens(totalTokens), `${formatUsdRange(totalLow, totalHigh)} · ${summaryDays.length} 天`)}
       </div>
     </div>
   `;
@@ -447,6 +624,191 @@ function renderCodexSessions(sessions) {
       </article>
     `;
   }).join("");
+}
+
+function renderCodexSessionManager(report) {
+  const sessions = Array.isArray(report?.sessions) ? report.sessions : [];
+  const search = $("#codexSessionSearch");
+  const monthSelect = $("#codexSessionMonthFilter");
+  const sortSelect = $("#codexSessionSort");
+  search.value = codexSessionQuery;
+  sortSelect.value = codexSessionSort;
+  renderCodexSessionMonthOptions(monthSelect, sessions);
+
+  if (!sessions.length) {
+    $("#codexSessionSummary").innerHTML = "";
+    $("#codexSessionList").innerHTML = `<div class="empty-state">暂无可管理的会话明细</div>`;
+    $("#codexSessionMoreButton").hidden = true;
+    return;
+  }
+
+  const filtered = sortCodexSessions(filterCodexSessions(sessions));
+  const visible = filtered.slice(0, codexSessionVisible);
+  $("#codexSessionSummary").innerHTML = renderCodexSessionSummary(filtered, sessions.length);
+  $("#codexSessionList").innerHTML = visible.length
+    ? visible.map(renderCodexManagedSession).join("")
+    : `<div class="empty-state">没有匹配的会话</div>`;
+  const moreButton = $("#codexSessionMoreButton");
+  moreButton.hidden = filtered.length <= visible.length;
+  moreButton.textContent = `显示更多 · ${visible.length}/${filtered.length}`;
+}
+
+function renderCodexSessionMonthOptions(select, sessions) {
+  const months = [...new Set(sessions.map((session) => session.month).filter(Boolean))].sort().reverse();
+  if (codexSessionMonth !== "all" && !months.includes(codexSessionMonth)) {
+    codexSessionMonth = "all";
+  }
+  select.innerHTML = [
+    `<option value="all"${codexSessionMonth === "all" ? " selected" : ""}>全部月份</option>`,
+    ...months.map((month) => {
+      const selected = month === codexSessionMonth ? " selected" : "";
+      return `<option value="${escapeAttr(month)}"${selected}>${escapeHtml(formatMonthLabel(month))}</option>`;
+    })
+  ].join("");
+}
+
+function filterCodexSessions(sessions) {
+  const query = codexSessionQuery.trim().toLowerCase();
+  return sessions.filter((session) => {
+    if (codexSessionMonth !== "all" && session.month !== codexSessionMonth) return false;
+    if (!query) return true;
+    const text = [
+      session.title,
+      session.id,
+      session.cwd,
+      session.model,
+      session.provider,
+      session.source,
+      session.day,
+      session.month
+    ].filter(Boolean).join(" ").toLowerCase();
+    return text.includes(query);
+  });
+}
+
+function sortCodexSessions(sessions) {
+  const sorted = sessions.slice();
+  const dateValue = (session, key) => {
+    const date = new Date(session[key] || "");
+    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+  };
+  sorted.sort((left, right) => {
+    if (codexSessionSort === "cost_desc") {
+      return sessionCostValue(right) - sessionCostValue(left) || Number(right.tokens || 0) - Number(left.tokens || 0);
+    }
+    if (codexSessionSort === "updated_desc") {
+      return dateValue(right, "updated_at") - dateValue(left, "updated_at") || Number(right.tokens || 0) - Number(left.tokens || 0);
+    }
+    if (codexSessionSort === "created_desc") {
+      return dateValue(right, "created_at") - dateValue(left, "created_at") || Number(right.tokens || 0) - Number(left.tokens || 0);
+    }
+    return Number(right.tokens || 0) - Number(left.tokens || 0);
+  });
+  return sorted;
+}
+
+function renderCodexSessionSummary(sessions, totalCount) {
+  const usage = sessions.reduce((sum, session) => addUsageSplitClient(sum, session.usage_split), createEmptyUsageSplit());
+  const cost = sumSessionCosts(sessions);
+  return `
+    ${sessionSummaryItem("匹配会话", `${formatInteger(sessions.length)} / ${formatInteger(totalCount)}`, "可按标题、ID、目录搜索")}
+    ${sessionSummaryItem("总 Token", formatCompactTokens(usage.total_tokens), `入 ${formatCompactTokens(usage.input_tokens)} · 出 ${formatCompactTokens(usage.output_tokens)}`)}
+    ${sessionSummaryItem("缓存输入", formatCompactTokens(usage.cached_input_tokens), "已包含在输入 Token 中")}
+    ${sessionSummaryItem("总费用", cost.display, cost.note)}
+  `;
+}
+
+function sessionSummaryItem(label, value, note) {
+  return `
+    <span>
+      <b>${escapeHtml(label)}</b>
+      <strong>${escapeHtml(value)}</strong>
+      <em>${escapeHtml(note)}</em>
+    </span>
+  `;
+}
+
+function renderCodexManagedSession(session) {
+  const title = String(session.title || "未命名会话").trim() || "未命名会话";
+  const id = String(session.id || "").trim();
+  const model = [session.model || "unknown", session.provider].filter(Boolean).join(" · ");
+  const date = session.updated_at || session.created_at;
+  const dateLabel = date ? formatFullDateTime(date) : (session.updated || session.created || session.day || "--");
+  const usage = session.usage_split || {};
+  const cost = session.cost_estimate?.range_display || "--";
+  const requests = Number(session.requests) > 0 ? ` · ${formatInteger(session.requests)} 请求` : "";
+  const duration = Number(session.duration_ms) > 0 ? ` · ${formatDurationMs(session.duration_ms)}` : "";
+  return `
+    <article class="managed-session">
+      <div class="managed-session-main">
+        <strong title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
+        <span>${escapeHtml(shortSessionId(id))} · ${escapeHtml(model)} · ${escapeHtml(session.source || "unknown")} · ${escapeHtml(dateLabel)}${escapeHtml(requests)}${escapeHtml(duration)}</span>
+        ${session.cwd ? `<small title="${escapeAttr(session.cwd)}">${escapeHtml(session.cwd)}</small>` : ""}
+      </div>
+      <div class="managed-session-metrics" aria-label="Token 与费用">
+        ${sessionMetric("总", session.tokens_display || formatCompactTokens(session.tokens))}
+        ${sessionMetric("入", formatCompactTokens(usage.input_tokens))}
+        ${sessionMetric("缓", formatCompactTokens(usage.cached_input_tokens))}
+        ${sessionMetric("出", formatCompactTokens(usage.output_tokens))}
+        ${sessionMetric("费用", cost)}
+      </div>
+    </article>
+  `;
+}
+
+function sessionMetric(label, value) {
+  return `
+    <span>
+      <b>${escapeHtml(label)}</b>
+      <strong>${escapeHtml(value || "--")}</strong>
+    </span>
+  `;
+}
+
+function createEmptyUsageSplit() {
+  return {
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: 0
+  };
+}
+
+function addUsageSplitClient(target, source) {
+  const usage = source || {};
+  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]) {
+    target[key] += Number(usage[key]) || 0;
+  }
+  return target;
+}
+
+function sumSessionCosts(sessions) {
+  let low = 0;
+  let high = 0;
+  let priced = 0;
+  for (const session of sessions) {
+    const estimate = session.cost_estimate;
+    if (!estimate) continue;
+    low += Number(estimate.low_usd) || 0;
+    high += Number(estimate.high_usd) || 0;
+    priced += Number(estimate.priced_tokens) || 0;
+  }
+  return {
+    display: priced ? formatUsdRange(low, high) : "--",
+    note: priced ? `${formatCompactTokens(priced)} 已计价 Token` : "暂无费用估算"
+  };
+}
+
+function sessionCostValue(session) {
+  const estimate = session.cost_estimate || {};
+  return Number(estimate.midpoint_usd ?? estimate.high_usd ?? estimate.low_usd) || 0;
+}
+
+function shortSessionId(value) {
+  const id = String(value || "");
+  if (id.length <= 14) return id || "--";
+  return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
 function renderHistory() {
@@ -736,6 +1098,7 @@ function formatPeriodLabel(period) {
 
 function openSettings() {
   if (!state) return;
+  settingsUsageUserId = currentUsageUserId();
   fillSettingsForm(state.config);
   $("#settingsDialog").showModal();
   syncIcons();
@@ -753,6 +1116,41 @@ function fillSettingsForm(config) {
     if (input.type === "checkbox") input.checked = Boolean(value);
     else input.value = value ?? "";
   }
+  renderSettingsUsageUsers(config);
+}
+
+function renderSettingsUsageUsers(config) {
+  const users = Array.isArray(config?.usageUsers) ? config.usageUsers : [];
+  const select = $("#settingsUsageUserSelect");
+  if (!users.length) {
+    select.innerHTML = `<option value="gurara">Gurara</option>`;
+    settingsUsageUserId = "gurara";
+    fillUsageUserSettings(null);
+    return;
+  }
+  if (!users.some((user) => user.id === settingsUsageUserId)) {
+    settingsUsageUserId = config.activeUsageUserId || users[0].id;
+  }
+  select.innerHTML = users.map((user) => {
+    const selected = user.id === settingsUsageUserId ? " selected" : "";
+    return `<option value="${escapeAttr(user.id)}"${selected}>${escapeHtml(user.label || user.id)}</option>`;
+  }).join("");
+  select.value = settingsUsageUserId;
+  fillUsageUserSettings(users.find((user) => user.id === settingsUsageUserId) || users[0]);
+}
+
+function fillUsageUserSettings(user) {
+  const codex = user?.codexUsage || {};
+  const sub2api = user?.sub2api || {};
+  $("#settingsUsageUserLabel").value = user?.label || "";
+  $("#settingsCodexDbPath").value = codex.dbPath || "";
+  $("#settingsCodexTopSessions").value = codex.topSessions || 10;
+  $("#settingsCodexEnabled").checked = codex.enabled !== false;
+  $("#settingsSub2ApiBaseUrl").value = sub2api.baseUrl || "http://192.168.31.114:7999";
+  $("#settingsSub2ApiKey").value = "";
+  $("#settingsSub2ApiStartDate").value = sub2api.startDate || "";
+  $("#settingsSub2ApiLookbackDays").value = sub2api.lookbackDays || 120;
+  $("#settingsSub2ApiEnabled").checked = sub2api.enabled === true;
 }
 
 function getByPath(object, path) {
@@ -766,17 +1164,180 @@ async function saveSettings(event) {
     if (!input.name) continue;
     setByPath(config, input.name, readInput(input));
   }
+  readUsageUserSettingsIntoConfig(config);
   try {
     state = await api("/api/config", {
       method: "PUT",
       body: JSON.stringify({ config })
     });
+    syncSelectedUsageUserFromState();
     closeSettings();
     render();
     refreshCodexUsage({ quiet: true, force: true });
     showToast("设置已保存");
   } catch (error) {
     showToast(error.message);
+  }
+}
+
+function readUsageUserSettingsIntoConfig(config) {
+  const users = Array.isArray(config.usageUsers) ? config.usageUsers : [];
+  const user = users.find((item) => item.id === settingsUsageUserId);
+  if (!user) return;
+  user.label = $("#settingsUsageUserLabel").value.trim() || user.label || user.id;
+  user.codexUsage = {
+    ...(user.codexUsage || {}),
+    enabled: $("#settingsCodexEnabled").checked,
+    dbPath: $("#settingsCodexDbPath").value.trim(),
+    topSessions: Number($("#settingsCodexTopSessions").value) || 10
+  };
+  user.sub2api = {
+    ...(user.sub2api || {}),
+    enabled: $("#settingsSub2ApiEnabled").checked,
+    baseUrl: $("#settingsSub2ApiBaseUrl").value.trim(),
+    startDate: $("#settingsSub2ApiStartDate").value,
+    lookbackDays: Number($("#settingsSub2ApiLookbackDays").value) || 120
+  };
+  config.activeUsageUserId = user.id;
+  selectedUsageUserId = user.id;
+  localStorage.setItem("gpt-monitor-usage-user", selectedUsageUserId);
+}
+
+async function addUsageUser() {
+  if (!state) return;
+  const label = prompt("新用户名称", "新用户");
+  if (!label?.trim()) return;
+  const config = structuredClone(state.config);
+  config.usageUsers = Array.isArray(config.usageUsers) ? config.usageUsers : [];
+  const id = uniqueUsageUserId(label, config.usageUsers);
+  const baseSub2Api = getUsageUserById(currentUsageUserId())?.sub2api || {};
+  config.usageUsers.push({
+    id,
+    label: label.trim(),
+    enabled: true,
+    codexUsage: {
+      enabled: true,
+      dbPath: "",
+      uploadedFileName: "",
+      uploadedAt: null,
+      topSessions: 10
+    },
+    sub2api: {
+      enabled: false,
+      label: "Sub2API",
+      baseUrl: baseSub2Api.baseUrl || "http://192.168.31.114:7999",
+      apiKeyEnv: "",
+      apiKeyPath: "",
+      adminEmail: "",
+      adminPasswordEnv: "SUB2API_ADMIN_PASSWORD",
+      adminPasswordPath: "",
+      adminUsageLimit: 50000,
+      lookbackDays: baseSub2Api.lookbackDays || 120,
+      startDate: baseSub2Api.startDate || ""
+    }
+  });
+  config.activeUsageUserId = id;
+  try {
+    state = await api("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ config })
+    });
+    selectedUsageUserId = id;
+    settingsUsageUserId = id;
+    localStorage.setItem("gpt-monitor-usage-user", id);
+    render();
+    fillSettingsForm(state.config);
+    await refreshCodexUsage({ quiet: true });
+    showToast("用户已新增");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function uniqueUsageUserId(label, users) {
+  const base = String(label || "user")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "user";
+  const taken = new Set(users.map((user) => user.id));
+  let id = base;
+  let index = 2;
+  while (taken.has(id)) {
+    id = `${base}-${index}`;
+    index += 1;
+  }
+  return id;
+}
+
+async function uploadCodexDb() {
+  const file = $("#codexDbFile").files?.[0];
+  if (!file) {
+    showToast("请选择 SQLite 文件");
+    return;
+  }
+  readUsageUserSettingsIntoConfig(state.config);
+  const button = $("#codexDbUploadButton");
+  button.disabled = true;
+  try {
+    const response = await fetch(appUrl(`/api/users/${encodeURIComponent(settingsUsageUserId)}/codex-db`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-File-Name": file.name.replace(/[^\w.-]+/g, "_")
+      },
+      body: file
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    codexUsageState = payload;
+    state = await api("/api/state");
+    syncSelectedUsageUserFromState();
+    render();
+    fillSettingsForm(state.config);
+    showToast("SQLite 已上传并刷新");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveSub2ApiKey() {
+  const apiKey = $("#settingsSub2ApiKey").value.trim();
+  if (!apiKey) {
+    showToast("请输入 Sub2API API Key");
+    return;
+  }
+  readUsageUserSettingsIntoConfig(state.config);
+  const button = $("#sub2ApiKeySaveButton");
+  button.disabled = true;
+  try {
+    const response = await fetch(appUrl(`/api/users/${encodeURIComponent(settingsUsageUserId)}/sub2api-key`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        apiKey,
+        enabled: $("#settingsSub2ApiEnabled").checked,
+        baseUrl: $("#settingsSub2ApiBaseUrl").value.trim(),
+        startDate: $("#settingsSub2ApiStartDate").value,
+        lookbackDays: Number($("#settingsSub2ApiLookbackDays").value) || 120
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    codexUsageState = payload;
+    state = await api("/api/state");
+    syncSelectedUsageUserFromState();
+    render();
+    fillSettingsForm(state.config);
+    showToast("Sub2API Key 已保存并刷新");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -891,6 +1452,14 @@ function formatUsd(value) {
   if (number >= 10) return `$${number.toFixed(2)}`;
   if (number >= 1) return `$${number.toFixed(3)}`;
   return `$${number.toFixed(4)}`;
+}
+
+function formatDurationMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  if (number >= 60000) return `${trimNumber(number / 60000, 1)} 分`;
+  if (number >= 1000) return `${trimNumber(number / 1000, 1)} 秒`;
+  return `${Math.round(number)} ms`;
 }
 
 function svgNumber(value) {

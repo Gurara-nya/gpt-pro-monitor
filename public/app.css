@@ -438,7 +438,13 @@ main {
 .token-bar span,
 .token-session span,
 .token-daily-summary b,
-.token-daily-summary em {
+.token-daily-summary em,
+.session-manager-head p,
+.session-summary b,
+.session-summary em,
+.managed-session span,
+.managed-session small,
+.managed-session-metrics b {
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 900;
@@ -559,18 +565,79 @@ main {
 .token-daily-list {
   border: 1px solid var(--line);
   background: rgba(5, 5, 5, 0.46);
+  overflow: hidden;
 }
 
 .token-daily-chart {
   min-width: 0;
   display: grid;
-  gap: 14px;
-  padding: 16px 16px 14px;
+  overflow: hidden;
+}
+
+.token-daily-plot {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: var(--daily-axis-width, 76px) minmax(0, 1fr);
+  align-items: start;
+  background: rgba(5, 5, 5, 0.28);
+}
+
+.token-daily-axis-frame {
+  position: relative;
+  z-index: 2;
+  padding: 16px 0 10px;
+  background: linear-gradient(90deg, rgba(5, 5, 5, 0.96) 78%, rgba(5, 5, 5, 0));
+  box-shadow: 16px 0 26px rgba(5, 5, 5, 0.48);
+  pointer-events: none;
+}
+
+.token-daily-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 16px 16px 10px 0;
+  cursor: grab;
+  overscroll-behavior-x: contain;
+  scrollbar-color: rgba(240, 240, 250, 0.36) rgba(240, 240, 250, 0.08);
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.token-daily-scroll:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -5px;
+}
+
+.token-daily-scroll.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.token-daily-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.token-daily-scroll::-webkit-scrollbar-track {
+  background: rgba(240, 240, 250, 0.08);
+}
+
+.token-daily-scroll::-webkit-scrollbar-thumb {
+  background: rgba(240, 240, 250, 0.36);
+  border-radius: 999px;
 }
 
 .token-daily-svg {
   width: 100%;
-  min-height: 210px;
+  height: auto;
+  min-height: 220px;
+  display: block;
+  overflow: visible;
+}
+
+.token-daily-axis {
+  width: var(--daily-axis-width, 76px);
+  height: auto;
+  min-height: 220px;
   display: block;
   overflow: visible;
 }
@@ -580,12 +647,22 @@ main {
   stroke-width: 1;
 }
 
+.token-daily-axis-grid line {
+  stroke: rgba(240, 240, 250, 0.36);
+  stroke-width: 1;
+}
+
 .token-daily-grid text,
-.token-daily-labels text {
+.token-daily-labels text,
+.token-daily-axis-grid text {
   fill: var(--muted);
   font-size: 20px;
   font-weight: 900;
   letter-spacing: 0.04em;
+}
+
+.token-daily-axis-grid text {
+  text-anchor: end;
 }
 
 .token-daily-area {
@@ -604,6 +681,15 @@ main {
   fill: var(--canvas);
   stroke: var(--ink);
   stroke-width: 4;
+  transition: fill 0.16s ease, stroke 0.16s ease, transform 0.16s ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.token-daily-point:hover circle {
+  fill: var(--ink);
+  stroke: var(--canvas);
+  transform: scale(1.25);
 }
 
 .token-daily-summary {
@@ -663,6 +749,135 @@ main {
   font-size: 0.76rem;
   font-weight: 900;
   letter-spacing: 0.08em;
+}
+
+.session-manager {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.session-manager-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.session-manager-head p {
+  margin: 0 0 5px;
+}
+
+.session-manager-head h3 {
+  margin: 0;
+  font-size: clamp(1.15rem, 2.2vw, 1.6rem);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.session-controls {
+  min-width: min(640px, 100%);
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) 142px 170px;
+  gap: 10px;
+}
+
+.session-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.session-summary span {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 13px;
+  background: rgba(5, 5, 5, 0.72);
+}
+
+.session-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.2rem;
+  letter-spacing: 0.02em;
+}
+
+.session-summary em {
+  font-style: normal;
+  line-height: 1.35;
+  text-transform: none;
+}
+
+.session-list {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.managed-session {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(440px, 0.9fr);
+  gap: 16px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.managed-session-main {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.managed-session-main strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  letter-spacing: 0.03em;
+}
+
+.managed-session-main span,
+.managed-session-main small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-session-main small {
+  text-transform: none;
+}
+
+.managed-session-metrics {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.managed-session-metrics span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  background: rgba(5, 5, 5, 0.72);
+}
+
+.managed-session-metrics strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.96rem;
+  letter-spacing: 0.02em;
 }
 
 .panel-head {
@@ -1394,6 +1609,32 @@ input[type="color"] {
     grid-template-columns: 1fr;
   }
 
+  .session-manager-head,
+  .managed-session {
+    grid-template-columns: 1fr;
+  }
+
+  .session-manager-head {
+    flex-direction: column;
+  }
+
+  .session-controls {
+    width: 100%;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .session-controls input {
+    grid-column: 1 / -1;
+  }
+
+  .session-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .managed-session {
+    align-items: stretch;
+  }
+
   .history-heading,
   .range-control,
   .range-control strong {
@@ -1474,7 +1715,13 @@ input[type="color"] {
 
   .token-bar,
   .token-session,
-  .token-daily-summary {
+  .token-daily-summary,
+  .session-summary,
+  .managed-session-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .session-controls {
     grid-template-columns: 1fr;
   }
 

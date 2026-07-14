@@ -4,9 +4,11 @@ cc-switch/
 data/*
 !data/.gitkeep
 output/
+logs/
 .env
 .env.*
 !.env.example
 *.local
 *.tmp
 *.log
+sub2api_daily*.csv

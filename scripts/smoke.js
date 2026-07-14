@@ -35,10 +35,13 @@ async function main() {
   assert.equal(typeof state.config.port, "number");
   assert.equal(typeof state.config.account.label, "string");
   assert.equal(typeof state.config.account.authPath, "string");
+  assert.equal(Array.isArray(state.config.usageUsers), true);
+  assert.equal(typeof state.config.activeUsageUserId, "string");
   assert.equal(typeof state.computed.status, "string");
 
   const exported = await request("/api/export");
   assert.equal(typeof exported.config.account.label, "string");
+  assert.equal(Array.isArray(exported.config.usageUsers), true);
 
   const html = await fetch(baseUrl, { headers: authHeaders() }).then((response) => response.text());
   assert.match(html, /GPT Pro Monitor/);

@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GPT Pro Monitor</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css" />
-    <script src="/app.js" defer></script>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="app.css" />
+    <script src="app.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -83,6 +83,37 @@
           </article>
         </section>
 
+        <section class="history-panel" aria-label="同步历史">
+          <div class="panel-head">
+            <div class="history-heading">
+              <div class="range-control">
+                <button class="range-arrow" id="prevPeriodButton" type="button" aria-label="上一段">
+                  <i data-lucide="chevron-left"></i>
+                </button>
+                <strong id="historyRangeLabel">--</strong>
+                <button class="range-arrow" id="nextPeriodButton" type="button" aria-label="下一段">
+                  <i data-lucide="chevron-right"></i>
+                </button>
+              </div>
+            </div>
+            <div class="history-actions">
+              <div class="view-tabs" role="tablist" aria-label="历史视图">
+                <button class="view-tab" data-view="day" type="button">日</button>
+                <button class="view-tab" data-view="week" type="button">周</button>
+                <button class="view-tab" data-view="month" type="button">月</button>
+              </div>
+              <button class="icon-button quiet" id="clearButton" type="button" aria-label="清空历史" title="清空历史">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+          </div>
+          <div class="history-chart" id="historyChart"></div>
+          <div class="history-list" id="historyList"></div>
+          <button class="history-list-toggle" id="toggleHistoryListButton" type="button" hidden>
+            展开列表
+          </button>
+        </section>
+
         <section class="history-panel token-panel" aria-label="Codex Token 消耗">
           <div class="panel-head token-panel-head">
             <div class="token-title">
@@ -91,6 +122,7 @@
               <small id="codexUsageStatus">等待同步</small>
             </div>
             <div class="token-actions">
+              <select id="usageUserSelect" aria-label="选择数据用户"></select>
               <select id="codexMonthSelect" aria-label="选择 Token 月份"></select>
               <button class="icon-button quiet" id="codexUsageRefreshButton" type="button" aria-label="刷新 Token 数据" title="刷新 Token 数据">
                 <i data-lucide="refresh-cw"></i>
@@ -154,37 +186,30 @@
               <div id="codexTopSessions"></div>
             </details>
           </div>
-        </section>
 
-        <section class="history-panel" aria-label="同步历史">
-          <div class="panel-head">
-            <div class="history-heading">
-              <div class="range-control">
-                <button class="range-arrow" id="prevPeriodButton" type="button" aria-label="上一段">
-                  <i data-lucide="chevron-left"></i>
-                </button>
-                <strong id="historyRangeLabel">--</strong>
-                <button class="range-arrow" id="nextPeriodButton" type="button" aria-label="下一段">
-                  <i data-lucide="chevron-right"></i>
-                </button>
+          <section class="session-manager" aria-label="会话管理">
+            <div class="session-manager-head">
+              <div>
+                <p>Sessions</p>
+                <h3>会话管理</h3>
+              </div>
+              <div class="session-controls">
+                <input id="codexSessionSearch" type="search" placeholder="搜索标题、ID、目录、模型" autocomplete="off" />
+                <select id="codexSessionMonthFilter" aria-label="筛选会话月份"></select>
+                <select id="codexSessionSort" aria-label="会话排序">
+                  <option value="tokens_desc">Token 从高到低</option>
+                  <option value="cost_desc">费用从高到低</option>
+                  <option value="updated_desc">最近更新</option>
+                  <option value="created_desc">创建时间</option>
+                </select>
               </div>
             </div>
-            <div class="history-actions">
-              <div class="view-tabs" role="tablist" aria-label="历史视图">
-                <button class="view-tab" data-view="day" type="button">日</button>
-                <button class="view-tab" data-view="week" type="button">周</button>
-                <button class="view-tab" data-view="month" type="button">月</button>
-              </div>
-              <button class="icon-button quiet" id="clearButton" type="button" aria-label="清空历史" title="清空历史">
-                <i data-lucide="trash-2"></i>
-              </button>
-            </div>
-          </div>
-          <div class="history-chart" id="historyChart"></div>
-          <div class="history-list" id="historyList"></div>
-          <button class="history-list-toggle" id="toggleHistoryListButton" type="button" hidden>
-            展开列表
-          </button>
+            <div class="session-summary" id="codexSessionSummary"></div>
+            <div class="session-list" id="codexSessionList"></div>
+            <button class="history-list-toggle" id="codexSessionMoreButton" type="button" hidden>
+              显示更多
+            </button>
+          </section>
         </section>
       </main>
     </div>
@@ -243,24 +268,61 @@
           </section>
 
           <section>
-            <h3>Codex Token</h3>
+            <h3>用户数据</h3>
             <div class="form-grid">
-              <label class="wide">
-                <span>SQLite 数据库</span>
-                <input name="codexUsage.dbPath" autocomplete="off" />
+              <label>
+                <span>数据用户</span>
+                <select id="settingsUsageUserSelect"></select>
+              </label>
+              <label>
+                <span>用户名称</span>
+                <input id="settingsUsageUserLabel" autocomplete="off" />
               </label>
               <label class="wide">
-                <span>Skill 路径</span>
-                <input name="codexUsage.skillPath" autocomplete="off" />
+                <span>SQLite 数据库路径</span>
+                <input id="settingsCodexDbPath" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>上传 SQLite</span>
+                <input id="codexDbFile" type="file" accept=".sqlite,.sqlite3,.db" />
               </label>
               <label>
                 <span>高消耗会话数</span>
-                <input name="codexUsage.topSessions" type="number" min="1" max="50" />
+                <input id="settingsCodexTopSessions" type="number" min="1" max="50" />
               </label>
               <label class="check-row">
-                <input name="codexUsage.enabled" type="checkbox" />
+                <input id="settingsCodexEnabled" type="checkbox" />
                 <span>启用 Token 面板</span>
               </label>
+              <button class="text-button" id="addUsageUserButton" type="button">新增用户</button>
+              <button class="text-button" id="codexDbUploadButton" type="button">上传并刷新</button>
+            </div>
+          </section>
+
+          <section>
+            <h3>Sub2API 用户数据</h3>
+            <div class="form-grid">
+              <label class="wide">
+                <span>Base URL</span>
+                <input id="settingsSub2ApiBaseUrl" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>API Key</span>
+                <input id="settingsSub2ApiKey" type="password" autocomplete="off" placeholder="留空不变" />
+              </label>
+              <label>
+                <span>起始日期</span>
+                <input id="settingsSub2ApiStartDate" type="date" />
+              </label>
+              <label>
+                <span>回看天数</span>
+                <input id="settingsSub2ApiLookbackDays" type="number" min="1" max="730" />
+              </label>
+              <label class="check-row">
+                <input id="settingsSub2ApiEnabled" type="checkbox" />
+                <span>启用 Sub2API</span>
+              </label>
+              <button class="text-button" id="sub2ApiKeySaveButton" type="button">保存 Key 并刷新</button>
             </div>
           </section>
 

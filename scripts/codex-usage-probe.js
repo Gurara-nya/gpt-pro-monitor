@@ -14,7 +14,7 @@ function asPercent(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
-  return number <= 1 ? Math.round(number * 100) : Math.round(number);
+  return Math.max(0, Math.min(100, Math.round(number)));
 }
 
 function secondsToShort(seconds) {
