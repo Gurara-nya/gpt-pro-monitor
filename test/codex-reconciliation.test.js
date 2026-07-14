@@ -47,6 +47,18 @@ test("mixed exact and SQLite-only usage combines exact cost with a model range",
   assert.ok(estimate.high_usd > estimate.low_usd);
 });
 
+test("cost aggregation keeps raw event precision until the final display rounding", () => {
+  const records = Array.from({ length: 100 }, () => ({
+    model: "gpt-5.6-luna",
+    at: "2026-07-14",
+    usageSplit: usage(0, 1)
+  }));
+  const estimate = aggregateSplitCost(records);
+  assert.equal(estimate.midpoint_usd, 0.0006);
+  assert.equal(estimate.components.output_usd, 0.0006);
+  assert.equal(estimate.low_usd, estimate.components.input_usd + estimate.components.cached_input_usd + estimate.components.output_usd);
+});
+
 test("coverage distinguishes parsed, priced, unparsed and unpriced tokens", () => {
   const exact = { model: "gpt-5.6-luna", usageSplit: usage(80, 20), at: "2026-07-14" };
   const estimated = {

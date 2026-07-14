@@ -2909,22 +2909,25 @@ function aggregateSplitCost(records) {
   for (const record of rows) {
     addUsageSplit(usageSplit, record.usageSplit);
     const estimate = record.estimated
-      ? costEstimateForTokens(
+      ? estimateTotalTokenRange(
         record.tokens || record.usageSplit?.total_tokens,
         record.model,
-        record.pricingOverrides,
-        record.at
+        { overrides: record.pricingOverrides, at: record.at }
       )
-      : costEstimateForUsageSplit(record.usageSplit, record.model, record.pricingOverrides, record.at);
+      : estimateSplitCost(
+        record.usageSplit,
+        record.model,
+        { overrides: record.pricingOverrides, at: record.at }
+      );
     if (record.estimated) estimatedTokens += nonnegativeInteger(record.tokens || record.usageSplit?.total_tokens);
     if (!estimate) {
-      unpricedTokens += nonnegativeInteger(record.usageSplit?.total_tokens);
+      unpricedTokens += nonnegativeInteger(record.tokens || record.usageSplit?.total_tokens);
       continue;
     }
-    low += estimate.low_usd;
-    high += estimate.high_usd;
-    midpoint += estimate.midpoint_usd;
-    pricedTokens += estimate.priced_tokens;
+    low += estimate.low;
+    high += estimate.high;
+    midpoint += estimate.midpoint;
+    pricedTokens += estimate.pricedTokens;
     components.input_usd += estimate.components?.input_usd || 0;
     components.cached_input_usd += estimate.components?.cached_input_usd || 0;
     components.output_usd += estimate.components?.output_usd || 0;
