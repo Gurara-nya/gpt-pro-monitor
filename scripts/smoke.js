@@ -103,10 +103,21 @@ async function main() {
   assert.match(html, /GPT Pro Monitor/);
   assert.doesNotMatch(html, /unpkg\.com|cdn\.jsdelivr\.net/);
 
+  const helpResponse = await fetch(`${baseUrl}/help`, { headers: authHeaders() });
+  assert.equal(helpResponse.ok, true, `/help returned ${helpResponse.status}`);
+  assert.match(await helpResponse.text(), /远程设备接入/);
+  const agentResponse = await fetch(`${baseUrl}/downloads/device-agent.js`, { headers: authHeaders() });
+  assert.equal(agentResponse.ok, true, `/downloads/device-agent.js returned ${agentResponse.status}`);
+  assert.match(agentResponse.headers.get("content-disposition") || "", /device-agent\.js/);
+  assert.match(await agentResponse.text(), /device-agent-state\.json/);
+
   const origin = new URL(baseUrl).origin;
   const aliasResponse = await fetch(`${origin}/monitor/`, { headers: authHeaders() });
   assert.equal(aliasResponse.ok, true, `/monitor/ returned ${aliasResponse.status}`);
   assert.match(await aliasResponse.text(), /GPT Pro Monitor/);
+  const aliasHelpResponse = await fetch(`${origin}/monitor/help`, { headers: authHeaders() });
+  assert.equal(aliasHelpResponse.ok, true, `/monitor/help returned ${aliasHelpResponse.status}`);
+  assert.match(await aliasHelpResponse.text(), /远程设备接入/);
 
   if (accessSecret) {
     const unauthorized = await fetch(`${baseUrl}/api/state`);

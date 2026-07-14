@@ -254,6 +254,11 @@ button {
   box-shadow: none;
 }
 
+.help-button {
+  text-decoration: none;
+  font-weight: 900;
+}
+
 .filled-button,
 .text-button {
   gap: 8px;
@@ -279,6 +284,7 @@ button.spinning:disabled {
 }
 
 button:focus-visible,
+a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 summary:focus-visible {

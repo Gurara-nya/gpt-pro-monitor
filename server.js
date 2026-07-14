@@ -39,6 +39,7 @@ const SUB2API_CACHE_HISTORY_MAX_DAYS = 730;
 const DEFAULT_USAGE_USER_ID = "gurara";
 const CODEX_USAGE_SCRIPT = path.join(ROOT, "scripts", "codex-usage", "scripts", "generate_codex_usage_report.py");
 const CODEX_USAGE_HTML_TEMPLATE = path.join(ROOT, "scripts", "codex-usage", "assets", "report-template.html");
+const DEVICE_AGENT_FILE = path.join(ROOT, "device-agent.js");
 const CODEX_USAGE_REPORT_FILE = "latest.html";
 const CODEX_USAGE_JSON_FILE = "latest.json";
 const CODEX_USAGE_MD_FILE = "latest.md";
@@ -3596,6 +3597,23 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+async function serveDeviceAgent(req, res) {
+  try {
+    const body = await readFile(DEVICE_AGENT_FILE);
+    res.writeHead(200, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="device-agent.js"',
+      "Cache-Control": "no-cache",
+      "Content-Length": body.length
+    });
+    if (req.method === "HEAD") res.end();
+    else res.end(body);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Device agent not found");
+  }
+}
+
 async function serveCodexUsageReport(res, pathname) {
   const reportDir = path.resolve(CODEX_USAGE_OUTPUT_DIR);
   const baseRoute = `/${CODEX_USAGE_OUTPUT_DIR.split(path.sep).pop()}`;
@@ -3850,6 +3868,14 @@ function createServer() {
       }
       if (req.method === "GET" && url.pathname.startsWith(`/${CODEX_USAGE_OUTPUT_DIR.split(path.sep).pop()}/`)) {
         await serveCodexUsageReport(res, url.pathname);
+        return;
+      }
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/downloads/device-agent.js") {
+        await serveDeviceAgent(req, res);
+        return;
+      }
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/help") {
+        await serveStatic(req, res, "/help.html");
         return;
       }
       await serveStatic(req, res, url.pathname);
