@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "monitor:restart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-monitor.ps1",
+    "device:agent": "node device-agent.js --once",
     "test": "node --test test/*.test.js",
     "smoke": "node scripts/smoke.js",
     "secret": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\"",

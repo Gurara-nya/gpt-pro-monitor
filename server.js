@@ -9,7 +9,8 @@ const { mkdir, readFile, readdir, rename, writeFile } = require("node:fs/promise
 const { promisify } = require("node:util");
 const { querySessions } = require("./lib/session-query");
 const { usageWindows, withUsageWindows } = require("./lib/quota-windows");
-const { readRolloutTelemetry } = require("./lib/codex-telemetry");
+const { readRolloutTelemetry, threadHash: hashThreadId } = require("./lib/codex-telemetry");
+const { DeviceRegistry } = require("./lib/device-registry");
 const {
   OFFICIAL_PRICING_USD_PER_MILLION,
   PRICE_CATALOG_VERSION,
@@ -164,6 +165,7 @@ const MIME_TYPES = {
 
 let schedulerBusy = false;
 let codexUsageSchedulerBusy = false;
+const codexUsageRefreshes = new Map();
 const rateLimitBuckets = new Map();
 
 function clone(value) {
@@ -591,14 +593,13 @@ async function getCodexUsageState({ force = false, userId = null } = {}) {
   if (!force) {
     if (cache?.result?.report) {
       const cachedResult = attachUsageUser(cache.result, user);
-      if (cache.configKey !== configKey) {
-        return {
-          ...cachedResult,
-          status: cachedResult.status === "ok" ? "stale" : cachedResult.status,
-          message: `${cachedResult.message || "显示本地缓存"}；数据源配置已变化，手动刷新后更新`
-        };
-      }
-      return cachedResult;
+      if (cache.configKey === configKey) return cachedResult;
+      queueCodexUsageRefresh(user.id, "cache-mismatch");
+      return {
+        ...cachedResult,
+        status: "stale",
+        message: "配置或数据源已变化，正在后台重建；当前显示最近缓存"
+      };
     }
     return {
       status: "empty",
@@ -635,6 +636,21 @@ async function getCodexUsageState({ force = false, userId = null } = {}) {
       user: publicUsageUser(user)
     };
   }
+}
+
+function queueCodexUsageRefresh(userId, reason = "background") {
+  const id = cleanId(userId || DEFAULT_USAGE_USER_ID, "user");
+  if (codexUsageRefreshes.has(id)) return codexUsageRefreshes.get(id);
+  const refresh = getCodexUsageState({ force: true, userId: id })
+    .catch((error) => {
+      console.error(`[codex-usage] background refresh failed for ${id} (${reason}): ${error.message}`);
+      return null;
+    })
+    .finally(() => {
+      if (codexUsageRefreshes.get(id) === refresh) codexUsageRefreshes.delete(id);
+    });
+  codexUsageRefreshes.set(id, refresh);
+  return refresh;
 }
 
 async function loadCodexUsageCache(userId) {
@@ -691,6 +707,7 @@ function codexUsageConfigKey(user) {
   const dbPath = resolveUserPath(usageConfig.dbPath, DEFAULT_CODEX_USAGE.dbPath);
   const apiKeyPath = sub2api.apiKeyPath ? resolveUserPath(sub2api.apiKeyPath, "") : "";
   const adminPasswordPath = sub2api.adminPasswordPath ? resolveUserPath(sub2api.adminPasswordPath, "") : "";
+  const deviceDir = path.join(codexUsageUserDir(user.id), "devices");
   return JSON.stringify({
     reportSchema: "event-telemetry-v2",
     userId: user.id,
@@ -700,6 +717,11 @@ function codexUsageConfigKey(user) {
       dbFile: fileSignature(dbPath),
       topSessions: usageConfig.topSessions,
       pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides)
+    },
+    devices: {
+      manifest: fileSignature(path.join(deviceDir, "manifest.json")),
+      events: fileSignature(path.join(deviceDir, "events.jsonl")),
+      snapshots: fileSignature(path.join(deviceDir, "snapshots.json"))
     },
     sub2api: {
       enabled: sub2api.enabled === true,
@@ -763,6 +785,7 @@ async function buildCodexUsageState(user) {
   }
   enrichCodexUsageCosts(report, usageDetails);
   enrichReportWithCodexSessions(report, usageDetails);
+  await enrichReportWithDevices(report, usageDetails, user);
   await enrichReportWithSub2Api(report, user.sub2api);
   await writeJson(jsonPath, report);
   return {
@@ -823,6 +846,7 @@ async function generateCodexUsageHtmlReport({ userId = null } = {}) {
   const usageDetails = reconcileCodexUsageDetails(report, await loadCodexTokenUsageDetails(usageConfig));
   enrichCodexUsageCosts(report, usageDetails);
   enrichReportWithCodexSessions(report, usageDetails);
+  await enrichReportWithDevices(report, usageDetails, user);
   await enrichReportWithSub2Api(report, user.sub2api);
   await writeJson(jsonPath, report);
   await writeCodexUsageHtmlFromReport(report, htmlPath);
@@ -872,6 +896,12 @@ function codexUsageOutputDir(userId) {
   return path.join(CODEX_USAGE_OUTPUT_DIR, cleanId(userId || DEFAULT_USAGE_USER_ID, "user"));
 }
 
+function deviceRegistry(userId) {
+  return new DeviceRegistry(path.join(codexUsageUserDir(userId), "devices"), {
+    localName: os.hostname()
+  });
+}
+
 function publicUsageUser(user) {
   return {
     id: user.id,
@@ -908,11 +938,19 @@ function attachUsageUser(result, user) {
   };
 }
 
-function publicCodexUsageState(result) {
+function publicCodexUsageState(result, deviceId = "all") {
   if (!result || typeof result !== "object") return result;
   if (!result.report || typeof result.report !== "object") return result;
-  const report = { ...result.report };
+  const requestedDevice = cleanString(deviceId || "all", "all", 120);
+  const selectedView = requestedDevice !== "all" ? result.report.device_views?.[requestedDevice] : null;
+  const report = selectedView ? {
+    ...result.report,
+    ...selectedView,
+    summary: { ...result.report.summary, ...selectedView.summary },
+    selected_device_id: requestedDevice
+  } : { ...result.report, selected_device_id: "all" };
   delete report.sessions;
+  delete report.device_views;
   return {
     ...result,
     report
@@ -922,7 +960,9 @@ function publicCodexUsageState(result) {
 async function getCodexUsageSessionsState(searchParams) {
   const userId = searchParams.get("userId");
   const result = await getCodexUsageState({ userId });
-  const sessions = Array.isArray(result?.report?.sessions) ? result.report.sessions : [];
+  const deviceId = cleanString(searchParams.get("deviceId") || "all", "all", 120);
+  const sessions = (Array.isArray(result?.report?.sessions) ? result.report.sessions : [])
+    .filter((session) => deviceId === "all" || session.device_id === deviceId);
   const page = querySessions(sessions, {
     q: searchParams.get("q"),
     month: searchParams.get("month"),
@@ -935,6 +975,7 @@ async function getCodexUsageSessionsState(searchParams) {
     generatedAt: result.generatedAt,
     message: result.message,
     user: result.user,
+    deviceId,
     ...page
   };
 }
@@ -1120,6 +1161,7 @@ function reconcileCodexUsageDetails(report, usageDetails) {
       const day = createdParts?.day || String(session.created || "").slice(0, 10);
       costRecords.push({
         threadId,
+        threadHash: events[0]?.threadHash || hashThreadId(threadId),
         at: createdAt,
         day,
         month: day ? day.slice(0, 7) : "",
@@ -1541,6 +1583,278 @@ function enrichReportWithCodexSessions(report, usageDetails = null) {
   report.sessions = sessions;
   report.session_summary = buildCodexSessionSummary(records, sessions);
   return report;
+}
+
+async function enrichReportWithDevices(report, usageDetails, user) {
+  if (!report || !usageDetails) return report;
+  const registry = deviceRegistry(user.id);
+  const deviceData = await registry.data();
+  const enabled = new Map(deviceData.devices.filter((device) => device.enabled && !device.revoked).map((device) => [device.id, device]));
+  const localRecords = (usageDetails.total?.records || []).map((record) => ({
+    ...record,
+    deviceId: "local",
+    sourceLabel: record.sourceLabel || sourceLabel(record.source),
+    pricingOverrides: usageDetails.pricingOverrides
+  }));
+  const localEventIds = new Set(localRecords.map((record) => record.eventId).filter(Boolean));
+  const localThreadHashes = new Set(localRecords.map((record) => record.threadHash).filter(Boolean));
+  const remoteRecords = [];
+
+  for (const event of deviceData.events) {
+    if (!enabled.has(event.ownerDeviceId) || localEventIds.has(event.eventId)) continue;
+    const device = enabled.get(event.ownerDeviceId);
+    remoteRecords.push({
+      eventId: event.eventId,
+      threadHash: event.threadHash,
+      threadId: event.threadHash,
+      deviceId: event.ownerDeviceId,
+      at: event.at,
+      day: localDateKey(new Date(event.at)),
+      month: localDateKey(new Date(event.at)).slice(0, 7),
+      model: event.model,
+      modelKey: normalizeModelKey(event.model),
+      provider: event.provider,
+      source: `device:${event.ownerDeviceId}`,
+      sourceLabel: `设备 · ${device.name}`,
+      usageSplit: event.usage,
+      pricingOverrides: usageDetails.pricingOverrides
+    });
+  }
+
+  const remoteByThread = new Map();
+  for (const record of remoteRecords) {
+    if (!remoteByThread.has(record.threadHash)) remoteByThread.set(record.threadHash, []);
+    remoteByThread.get(record.threadHash).push(record);
+  }
+  const snapshotsByThread = new Map();
+  for (const snapshot of deviceData.snapshots) {
+    if (!enabled.has(snapshot.deviceId) || localThreadHashes.has(snapshot.threadHash)) continue;
+    const previous = snapshotsByThread.get(snapshot.threadHash);
+    if (!previous || snapshot.totalTokens > previous.totalTokens ||
+      (snapshot.totalTokens === previous.totalTokens && snapshot.updatedAt > previous.updatedAt)) {
+      snapshotsByThread.set(snapshot.threadHash, snapshot);
+    }
+  }
+  for (const [threadHashValue, snapshot] of snapshotsByThread) {
+    const eventTokens = (remoteByThread.get(threadHashValue) || [])
+      .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+    const gap = Math.max(0, nonnegativeInteger(snapshot.totalTokens) - eventTokens);
+    if (!gap) continue;
+    const device = enabled.get(snapshot.deviceId);
+    const day = localDateKey(new Date(snapshot.updatedAt));
+    const record = {
+      threadHash: threadHashValue,
+      threadId: threadHashValue,
+      deviceId: snapshot.deviceId,
+      at: snapshot.updatedAt,
+      day,
+      month: day.slice(0, 7),
+      model: snapshot.model,
+      modelKey: normalizeModelKey(snapshot.model),
+      provider: snapshot.provider,
+      source: `device:${snapshot.deviceId}`,
+      sourceLabel: `设备 · ${device.name}`,
+      tokens: gap,
+      estimated: true,
+      usageSplit: {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: gap
+      },
+      pricingOverrides: usageDetails.pricingOverrides
+    };
+    remoteRecords.push(record);
+    if (!remoteByThread.has(threadHashValue)) remoteByThread.set(threadHashValue, []);
+    remoteByThread.get(threadHashValue).push(record);
+  }
+
+  const localSessions = (report.sessions || []).map((session) => ({ ...session, device_id: "local", device_name: enabled.get("local")?.name || os.hostname() }));
+  const remoteSessions = buildRemoteDeviceSessions(remoteRecords, enabled);
+  const allRecords = [...localRecords, ...remoteRecords];
+  const allSessions = [...localSessions, ...remoteSessions];
+  const views = {};
+  views.local = buildDeviceUsageView(localRecords, localSessions);
+  for (const device of deviceData.devices) {
+    if (device.id === "local") continue;
+    views[device.id] = buildDeviceUsageView(
+      remoteRecords.filter((record) => record.deviceId === device.id),
+      remoteSessions.filter((session) => session.device_id === device.id)
+    );
+  }
+  views.all = buildDeviceUsageView(allRecords, allSessions);
+
+  const allView = views.all;
+  Object.assign(report.summary, allView.summary);
+  report.daily = allView.daily;
+  report.daily_top = allView.daily_top;
+  report.sources = allView.sources;
+  report.models = allView.models;
+  report.month_views = allView.month_views;
+  report.monthly = allView.monthly;
+  report.default_month = allView.default_month;
+  report.top_sessions = allView.top_sessions;
+  report.sessions = allSessions;
+  report.session_summary = buildSessionSummaryFromRows(allSessions);
+  report.device_views = views;
+  report.device_breakdown = deviceData.devices.map((device) => {
+    const view = views[device.id] || buildDeviceUsageView([], []);
+    const total = nonnegativeInteger(view.summary.total_tokens);
+    const exact = (device.id === "local" ? localRecords : remoteRecords.filter((record) => record.deviceId === device.id))
+      .filter((record) => !record.estimated)
+      .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+    return {
+      ...device,
+      total_tokens: total,
+      usage_split: view.summary.usage_split,
+      cost_estimate: view.summary.cost_estimate,
+      exact_tokens: exact,
+      coverage_percent: total ? Math.round(exact / total * 10000) / 100 : 0,
+      share_percent: allView.summary.total_tokens ? Math.round(total / allView.summary.total_tokens * 10000) / 100 : 0
+    };
+  });
+  const exactRecords = allRecords.filter((record) => !record.estimated);
+  const exactUsage = createUsageGroup().usageSplit;
+  for (const record of exactRecords) addUsageSplit(exactUsage, record.usageSplit);
+  if (report.pricing?.split_coverage) {
+    const total = allView.summary.total_tokens;
+    const priced = nonnegativeInteger(allView.summary.cost_estimate?.priced_tokens);
+    Object.assign(report.pricing.split_coverage, {
+      report_tokens: total,
+      split_tokens: exactUsage.total_tokens,
+      input_tokens: exactUsage.input_tokens,
+      cached_input_tokens: exactUsage.cached_input_tokens,
+      output_tokens: exactUsage.output_tokens,
+      reasoning_output_tokens: exactUsage.reasoning_output_tokens,
+      split_coverage_percent: total ? Math.round(exactUsage.total_tokens / total * 10000) / 100 : 0,
+      priced_tokens: priced,
+      priced_coverage_percent: total ? Math.round(priced / total * 10000) / 100 : 0,
+      unparsed_tokens: Math.max(0, total - exactUsage.total_tokens),
+      unpriced_tokens: Math.max(0, total - priced),
+      full_coverage: total > 0 && exactUsage.total_tokens === total
+    });
+  }
+  return report;
+}
+
+function buildRemoteDeviceSessions(records, devices) {
+  const groups = new Map();
+  for (const record of records) {
+    const key = `${record.deviceId}:${record.threadHash}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(record);
+  }
+  return [...groups.entries()].map(([key, rows]) => {
+    const [deviceId, threadHashValue] = key.split(":");
+    const usageSplit = createUsageGroup().usageSplit;
+    for (const row of rows) addUsageSplit(usageSplit, row.usageSplit);
+    const first = rows.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
+    const last = rows.slice().sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    const device = devices.get(deviceId);
+    return {
+      id: `${threadHashValue}:${deviceId}`,
+      thread_hash: threadHashValue,
+      title: `远端会话 ${threadHashValue.slice(0, 10)}`,
+      day: first.day,
+      month: first.month,
+      created_at: first.at,
+      updated_at: last.at,
+      created: first.day,
+      updated: last.day,
+      model: last.model || "unknown",
+      model_key: normalizeModelKey(last.model),
+      provider: last.provider || "",
+      source: `设备 · ${device?.name || deviceId}`,
+      cwd: "",
+      rollout_path: "",
+      tokens: usageSplit.total_tokens,
+      tokens_display: formatCompactTokensForReport(usageSplit.total_tokens),
+      tokens_full: formatIntegerForReport(usageSplit.total_tokens),
+      usage_split: usageSplitPayload(usageSplit),
+      cost_estimate: aggregateSplitCost(rows),
+      exact_tokens: rows.filter((row) => !row.estimated).reduce((sum, row) => sum + row.usageSplit.total_tokens, 0),
+      unparsed_tokens: rows.filter((row) => row.estimated).reduce((sum, row) => sum + row.usageSplit.total_tokens, 0),
+      device_id: deviceId,
+      device_name: device?.name || deviceId,
+      remote: true
+    };
+  });
+}
+
+function buildDeviceUsageView(records, sessions) {
+  const indexes = buildCodexUsageIndexes(records);
+  const totalTokens = indexes.total.usageSplit.total_tokens;
+  const rows = (index, keyField) => [...index.entries()].map(([key, group]) => {
+    const tokens = group.usageSplit.total_tokens;
+    return {
+      [keyField]: key,
+      threads: groupThreadCount(group),
+      tokens,
+      tokens_display: formatCompactTokensForReport(tokens),
+      tokens_full: formatIntegerForReport(tokens),
+      share_pct: totalTokens ? Math.round(tokens / totalTokens * 10000) / 100 : 0,
+      share_display: `${totalTokens ? (tokens / totalTokens * 100).toFixed(2) : "0.00"}%`,
+      usage_split: usageSplitPayload(group.usageSplit),
+      cost_estimate: aggregateSplitCost(group.records)
+    };
+  });
+  const daily = rows(indexes.byDay, "day").sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  const models = rows(indexes.byModel, "model").sort((a, b) => b.tokens - a.tokens);
+  const sources = rows(indexes.bySource, "source").sort((a, b) => b.tokens - a.tokens);
+  const monthly = rows(indexes.byMonth, "month").sort((a, b) => String(a.month).localeCompare(String(b.month)));
+  const topSessions = sessions.slice().sort((a, b) => nonnegativeInteger(b.tokens) - nonnegativeInteger(a.tokens)).slice(0, 10);
+  const monthViews = monthly.map((monthRow) => {
+    const monthRecords = records.filter((record) => record.month === monthRow.month);
+    const monthSessions = sessions.filter((session) => session.month === monthRow.month);
+    const monthIndexes = buildCodexUsageIndexes(monthRecords);
+    const monthTokens = monthRow.tokens;
+    const monthRows = (index, keyField) => [...index.entries()].map(([key, group]) => ({
+      [keyField]: key,
+      threads: groupThreadCount(group),
+      tokens: group.usageSplit.total_tokens,
+      tokens_display: formatCompactTokensForReport(group.usageSplit.total_tokens),
+      usage_split: usageSplitPayload(group.usageSplit),
+      cost_estimate: aggregateSplitCost(group.records),
+      share_pct: monthTokens ? Math.round(group.usageSplit.total_tokens / monthTokens * 10000) / 100 : 0
+    }));
+    const days = monthRows(monthIndexes.byDay, "day").sort((a, b) => String(a.day).localeCompare(String(b.day)));
+    return {
+      ...monthRow,
+      avg_tokens: monthSessions.length ? Math.round(monthTokens / monthSessions.length) : 0,
+      avg_display: formatCompactTokensForReport(monthSessions.length ? monthTokens / monthSessions.length : 0),
+      usage_split: usageSplitPayload(monthIndexes.total.usageSplit),
+      cost_estimate: aggregateSplitCost(monthIndexes.total.records),
+      days,
+      models: monthRows(monthIndexes.byModel, "model").sort((a, b) => b.tokens - a.tokens),
+      sources: monthRows(monthIndexes.bySource, "source").sort((a, b) => b.tokens - a.tokens),
+      top_sessions: monthSessions.slice().sort((a, b) => b.tokens - a.tokens).slice(0, 10),
+      top_day: days.slice().sort((a, b) => b.tokens - a.tokens)[0] || null
+    };
+  });
+  const totalCost = aggregateSplitCost(indexes.total.records);
+  return {
+    summary: {
+      threads: sessions.length,
+      threads_display: formatIntegerForReport(sessions.length),
+      total_tokens: totalTokens,
+      total_tokens_display: formatCompactTokensForReport(totalTokens),
+      total_tokens_full: formatIntegerForReport(totalTokens),
+      avg_tokens: sessions.length ? Math.round(totalTokens / sessions.length) : 0,
+      avg_tokens_display: formatCompactTokensForReport(sessions.length ? totalTokens / sessions.length : 0),
+      usage_split: usageSplitPayload(indexes.total.usageSplit),
+      cost_estimate: totalCost
+    },
+    daily,
+    daily_top: daily.slice().sort((a, b) => b.tokens - a.tokens).slice(0, 10),
+    models,
+    sources,
+    monthly,
+    month_views: monthViews,
+    default_month: monthViews.at(-1)?.month || "",
+    top_sessions: topSessions,
+    sessions
+  };
 }
 
 function buildCodexSessionList(records, report) {
@@ -2660,7 +2974,9 @@ function formatCostEstimate(data) {
     model: data.model || "",
     rates: data.rates || null,
     usage_split: data.usageSplit ? usageSplitPayload(data.usageSplit) : null,
-    components: data.components || null,
+    components: data.components ? Object.fromEntries(
+      Object.entries(data.components).map(([key, value]) => [key, roundCurrency(value)])
+    ) : null,
     low_usd: roundCurrency(low),
     high_usd: roundCurrency(high),
     midpoint_usd: roundCurrency(midpoint),
@@ -3206,7 +3522,7 @@ function checkRateLimit(req) {
 }
 
 function sendJson(res, statusCode, payload) {
-  const body = Buffer.from(JSON.stringify(payload, null, 2), "utf8");
+  const body = Buffer.from(JSON.stringify(payload), "utf8");
   const acceptEncoding = String(res._monitorRequest?.headers?.["accept-encoding"] || "");
   const shouldGzip = body.length > 1024 && /\bgzip\b/i.test(acceptEncoding);
   const responseBody = shouldGzip ? zlib.gzipSync(body) : body;
@@ -3335,6 +3651,43 @@ async function saveSub2ApiKey(req, userId) {
   return getCodexUsageState({ force: true, userId: user.id });
 }
 
+function deviceBearerToken(req) {
+  const header = String(req.headers.authorization || "");
+  return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+}
+
+function monitorPublicUrl(req) {
+  const configured = String(process.env.GPT_MONITOR_PUBLIC_URL || "").trim().replace(/\/+$/, "");
+  if (configured && isValidHttpUrl(configured)) return configured;
+  return requestOrigin(req) || `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
+}
+
+function deviceAgentCommand(req, userId, deviceId, token) {
+  const url = `${monitorPublicUrl(req)}${getBasePath()}`.replace(/\/+$/, "");
+  return `node device-agent.js --url ${JSON.stringify(url)} --user ${JSON.stringify(userId)} --device ${JSON.stringify(deviceId)} --token ${JSON.stringify(token)}`;
+}
+
+async function listDeviceState(userId) {
+  const registry = deviceRegistry(userId);
+  const devices = await registry.list();
+  const usage = await getCodexUsageState({ userId });
+  const breakdown = new Map((usage.report?.device_breakdown || []).map((item) => [item.id, item]));
+  return devices.map((device) => ({ ...device, ...(breakdown.get(device.id) || {}) }));
+}
+
+async function handleDeviceIngest(req, res) {
+  const token = deviceBearerToken(req);
+  if (!token) throw Object.assign(new Error("Device Bearer token is required"), { statusCode: 401 });
+  const body = await parseBody(req);
+  const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
+  const registry = deviceRegistry(userId);
+  const result = await registry.ingest(token, body);
+  if (result.accepted || (Array.isArray(body.snapshots) && body.snapshots.length)) {
+    queueCodexUsageRefresh(userId, "device-ingest");
+  }
+  return sendJson(res, 200, result);
+}
+
 async function handleApi(req, res, url) {
   const codexDbUploadMatch = /^\/api\/users\/([^/]+)\/codex-db$/.exec(url.pathname);
   if (req.method === "PUT" && codexDbUploadMatch) {
@@ -3350,7 +3703,7 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/codex-usage") {
     return sendJson(res, 200, publicCodexUsageState(await getCodexUsageState({
       userId: url.searchParams.get("userId")
-    })));
+    }), url.searchParams.get("deviceId")));
   }
   if (req.method === "GET" && url.pathname === "/api/codex-usage/sessions") {
     return sendJson(res, 200, await getCodexUsageSessionsState(url.searchParams));
@@ -3360,13 +3713,47 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, publicCodexUsageState(await getCodexUsageState({
       force: true,
       userId: body.userId || url.searchParams.get("userId")
-    })));
+    }), body.deviceId || url.searchParams.get("deviceId")));
   }
   if (req.method === "POST" && url.pathname === "/api/codex-usage/report") {
     const body = await parseBody(req);
     return sendJson(res, 200, await generateCodexUsageHtmlReport({
       userId: body.userId || url.searchParams.get("userId")
     }));
+  }
+  if (req.method === "GET" && url.pathname === "/api/devices") {
+    const userId = cleanId(url.searchParams.get("userId") || DEFAULT_USAGE_USER_ID, "user");
+    return sendJson(res, 200, { userId, devices: await listDeviceState(userId) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/devices") {
+    const body = await parseBody(req);
+    const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
+    const created = await deviceRegistry(userId).create(body.name);
+    return sendJson(res, 201, {
+      ...created,
+      command: deviceAgentCommand(req, userId, created.device.id, created.token)
+    });
+  }
+  const devicePatchMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
+  if (req.method === "PATCH" && devicePatchMatch) {
+    const body = await parseBody(req);
+    const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
+    return sendJson(res, 200, await deviceRegistry(userId).patch(devicePatchMatch[1], body));
+  }
+  if (req.method === "DELETE" && devicePatchMatch) {
+    const body = await parseBody(req);
+    const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
+    return sendJson(res, 200, await deviceRegistry(userId).remove(devicePatchMatch[1]));
+  }
+  const deviceRotateMatch = /^\/api\/devices\/([^/]+)\/rotate-token$/.exec(url.pathname);
+  if (req.method === "POST" && deviceRotateMatch) {
+    const body = await parseBody(req);
+    const userId = cleanId(body.userId || DEFAULT_USAGE_USER_ID, "user");
+    const rotated = await deviceRegistry(userId).rotate(deviceRotateMatch[1]);
+    return sendJson(res, 200, {
+      ...rotated,
+      command: deviceAgentCommand(req, userId, rotated.device.id, rotated.token)
+    });
   }
   if (req.method === "GET" && url.pathname === "/api/export") {
     const [config, checks] = await Promise.all([loadConfig(), loadChecks()]);
@@ -3405,12 +3792,17 @@ function createServer() {
       if (!checkRateLimit(req)) {
         throw Object.assign(new Error("Too many requests"), { statusCode: 429 });
       }
+      const url = new URL(req.url, "http://localhost");
+      const ingestPath = stripBasePath(url.pathname);
+      if (req.method === "POST" && ingestPath === "/api/device-ingest/v1") {
+        await handleDeviceIngest(req, res);
+        return;
+      }
       if (!isAuthorized(req)) {
         sendUnauthorized(res);
         return;
       }
       verifySameOrigin(req);
-      const url = new URL(req.url, "http://localhost");
       const basePath = matchingBasePath(url.pathname);
       if (basePath && (req.method === "GET" || req.method === "HEAD") && url.pathname === basePath) {
         res.writeHead(308, {

@@ -50,6 +50,8 @@ let codexSessionSearchTimer = null;
 let codexSessionAbortController = null;
 let codexActiveTab = localStorage.getItem("gpt-monitor-codex-tab") === "sessions" ? "sessions" : "overview";
 let selectedUsageUserId = localStorage.getItem("gpt-monitor-usage-user") || "";
+let selectedDeviceId = localStorage.getItem("gpt-monitor-device") || "all";
+let deviceSettingsState = [];
 let settingsUsageUserId = "";
 let toastTimer = null;
 let historyViewMode = "week";
@@ -73,6 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function wireEvents() {
   $("#refreshButton").addEventListener("click", () => refreshUsage("manual"));
   $("#usageUserSelect").addEventListener("change", (event) => selectUsageUser(event.target.value));
+  $("#deviceSelect").addEventListener("change", (event) => selectDevice(event.target.value));
   $("#codexUsageRefreshButton").addEventListener("click", () => refreshCodexUsage({ force: true }));
   $("#codexUsageReportButton").addEventListener("click", generateCodexUsageReport);
   $("#codexMonthSelect").addEventListener("change", (event) => {
@@ -117,9 +120,11 @@ function wireEvents() {
   $("#settingsUsageUserSelect").addEventListener("change", (event) => {
     settingsUsageUserId = event.target.value;
     fillUsageUserSettings(getUsageUserById(settingsUsageUserId));
+    refreshDeviceSettings();
   });
   $("#addUsageUserButton").addEventListener("click", addUsageUser);
   $("#addPricingOverrideButton").addEventListener("click", () => appendPricingOverrideRow());
+  $("#createDeviceButton").addEventListener("click", createDevice);
   $("#codexDbUploadButton").addEventListener("click", uploadCodexDb);
   $("#sub2ApiKeySaveButton").addEventListener("click", saveSub2ApiKey);
   $("#clearButton").addEventListener("click", clearHistory);
@@ -248,6 +253,25 @@ function selectUsageUser(userId) {
   codexSessionPage = 1;
   codexSessionState = null;
   codexSessionError = "";
+  selectedDeviceId = "all";
+  localStorage.setItem("gpt-monitor-device", selectedDeviceId);
+  refreshCodexUsage({ quiet: true });
+}
+
+function currentDeviceId() {
+  const devices = codexUsageState?.report?.device_breakdown || [];
+  return selectedDeviceId === "all" || devices.some((device) => device.id === selectedDeviceId)
+    ? selectedDeviceId
+    : "all";
+}
+
+function selectDevice(deviceId) {
+  selectedDeviceId = deviceId || "all";
+  localStorage.setItem("gpt-monitor-device", selectedDeviceId);
+  codexUsageMonth = "";
+  codexSessionMonth = "all";
+  codexSessionPage = 1;
+  codexSessionState = null;
   refreshCodexUsage({ quiet: true });
 }
 
@@ -289,11 +313,12 @@ async function refreshCodexUsage({ quiet = false, force = false } = {}) {
   }
   try {
     const userId = currentUsageUserId();
+    const deviceId = currentDeviceId();
     codexUsageState = await api(
-      force ? "/api/codex-usage/refresh" : `/api/codex-usage?userId=${encodeURIComponent(userId)}`,
+      force ? "/api/codex-usage/refresh" : `/api/codex-usage?userId=${encodeURIComponent(userId)}&deviceId=${encodeURIComponent(deviceId)}`,
       {
         method: force ? "POST" : "GET",
-        ...(force ? { body: JSON.stringify({ userId }) } : {})
+        ...(force ? { body: JSON.stringify({ userId, deviceId }) } : {})
       }
     );
     renderCodexUsage();
@@ -329,6 +354,7 @@ async function refreshCodexSessions({ quiet = false, scroll = false } = {}) {
 
   const params = new URLSearchParams({
     userId: currentUsageUserId(),
+    deviceId: currentDeviceId(),
     q: codexSessionQuery,
     month: codexSessionMonth,
     sort: codexSessionSort,
@@ -454,6 +480,7 @@ function renderWindowCards() {
 
 function renderCodexUsage() {
   renderUsageUserSelect();
+  renderDeviceSelect();
   renderCodexTabs();
   const select = $("#codexMonthSelect");
   const status = codexUsageState?.status || "loading";
@@ -471,6 +498,7 @@ function renderCodexUsage() {
     $("#codexSourceList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexModelList").innerHTML = `<div class="empty-state">Token 数据暂不可用</div>`;
     $("#codexTopSessions").innerHTML = `<div class="empty-state">${escapeHtml(codexUsageState?.message || "等待 Token 数据")}</div>`;
+    $("#deviceBreakdownList").innerHTML = `<div class="empty-state">等待设备数据</div>`;
     $("#codexSessionCount").textContent = "默认收起";
     renderCodexSessionManager();
     return;
@@ -495,6 +523,7 @@ function renderCodexUsage() {
     }
   );
   $("#codexCostNote").innerHTML = codexCostNote(report);
+  renderDeviceBreakdown(report.device_breakdown || []);
   $("#codexDailyList").innerHTML = renderCodexDaily(selectedView?.days || []);
   setupDailyScroller($("#codexDailyList .token-daily-scroll"));
   $("#codexSourceList").innerHTML = renderCodexBars(selectedView?.sources || report.sources || [], "source");
@@ -517,6 +546,49 @@ function renderUsageUserSelect() {
       }).join("")
     : `<option value="gurara">Gurara</option>`;
   select.value = selectedUsageUserId;
+  select.hidden = users.length <= 1;
+}
+
+function renderDeviceSelect() {
+  const select = $("#deviceSelect");
+  const devices = codexUsageState?.report?.device_breakdown || [];
+  const allowed = new Set(devices.map((device) => device.id));
+  if (selectedDeviceId !== "all" && !allowed.has(selectedDeviceId)) selectedDeviceId = "all";
+  select.innerHTML = [
+    `<option value="all">全部设备</option>`,
+    ...devices.map((device) => `<option value="${escapeAttr(device.id)}">${escapeHtml(device.name || device.id)}${device.stale ? " · 过期" : ""}</option>`)
+  ].join("");
+  select.value = selectedDeviceId;
+  select.hidden = devices.length <= 1;
+}
+
+function renderDeviceBreakdown(devices) {
+  const list = $("#deviceBreakdownList");
+  if (!Array.isArray(devices) || !devices.length) {
+    list.innerHTML = `<div class="empty-state">暂无设备数据</div>`;
+    return;
+  }
+  list.innerHTML = devices.map((device) => {
+    const usage = device.usage_split || {};
+    const sync = device.builtIn ? "本机实时数据" : (device.lastSeenAt ? formatFullDateTime(device.lastSeenAt) : "尚未同步");
+    const stateLabel = device.revoked ? "已吊销" : device.stale ? "数据过期" : "正常";
+    return `
+      <article class="device-breakdown-row ${device.stale ? "is-stale" : ""}">
+        <div class="device-breakdown-title">
+          <strong>${escapeHtml(device.name || device.id)}</strong>
+          <span>${escapeHtml(stateLabel)} · ${escapeHtml(sync)}</span>
+        </div>
+        <div class="device-share"><strong>${formatPercent(device.share_percent)}</strong><i><em style="width:${safePercent(device.share_percent)}%"></em></i><span>${formatCompactTokens(device.total_tokens)} Token</span></div>
+        <dl>
+          <div><dt>输入</dt><dd>${formatCompactTokens(usage.input_tokens)}</dd></div>
+          <div><dt>缓存输入</dt><dd>${formatCompactTokens(usage.cached_input_tokens)}</dd></div>
+          <div><dt>输出</dt><dd>${formatCompactTokens(usage.output_tokens)}</dd></div>
+          <div><dt>API 等价成本</dt><dd>${escapeHtml(device.cost_estimate?.midpoint_display || "--")}</dd></div>
+          <div><dt>拆分覆盖</dt><dd>${formatPercent(device.coverage_percent)}</dd></div>
+        </dl>
+      </article>
+    `;
+  }).join("");
 }
 
 function setupDailyScroller(scroll) {
@@ -1205,10 +1277,94 @@ function openSettings() {
   fillSettingsForm(state.config);
   $("#settingsDialog").showModal();
   syncIcons();
+  refreshDeviceSettings();
 }
 
 function closeSettings() {
   $("#settingsDialog").close();
+  $("#deviceCommandOutput").value = "";
+  $("#deviceCommandField").hidden = true;
+}
+
+async function refreshDeviceSettings() {
+  try {
+    const result = await api(`/api/devices?userId=${encodeURIComponent(settingsUsageUserId || currentUsageUserId())}`);
+    deviceSettingsState = result.devices || [];
+    renderDeviceSettings();
+  } catch (error) {
+    $("#deviceSettingsList").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderDeviceSettings() {
+  const list = $("#deviceSettingsList");
+  list.innerHTML = deviceSettingsState.length ? deviceSettingsState.map((device) => `
+    <article class="device-settings-row" data-device-id="${escapeAttr(device.id)}">
+      <div><strong>${escapeHtml(device.name || device.id)}</strong><span>${device.builtIn ? "内置本机" : device.revoked ? "已吊销" : device.stale ? "数据过期" : "远端设备"} · ${device.lastSeenAt ? escapeHtml(formatFullDateTime(device.lastSeenAt)) : "尚未同步"}</span></div>
+      <span>${escapeHtml(formatCompactTokens(device.total_tokens))} Token</span>
+      <div class="device-settings-actions">
+        <button class="text-button" type="button" data-device-action="rename">改名</button>
+        ${device.builtIn ? "" : `<button class="text-button" type="button" data-device-action="rotate">轮换令牌</button><button class="text-button" type="button" data-device-action="toggle">${device.enabled && !device.revoked ? "吊销" : "启用"}</button>`}
+      </div>
+    </article>
+  `).join("") : `<div class="empty-state">暂无设备</div>`;
+  for (const button of $$('[data-device-action]', list)) {
+    button.addEventListener("click", () => manageDevice(button.closest("[data-device-id]").dataset.deviceId, button.dataset.deviceAction));
+  }
+}
+
+async function createDevice() {
+  const name = $("#newDeviceName").value.trim();
+  if (!name) return showToast("请输入设备名称");
+  try {
+    const result = await api("/api/devices", {
+      method: "POST",
+      body: JSON.stringify({ userId: settingsUsageUserId || currentUsageUserId(), name })
+    });
+    showDeviceCommand(result.command);
+    $("#newDeviceName").value = "";
+    await refreshDeviceSettings();
+    showToast("设备已创建；令牌只显示这一次");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function manageDevice(deviceId, action) {
+  const userId = settingsUsageUserId || currentUsageUserId();
+  const device = deviceSettingsState.find((item) => item.id === deviceId);
+  try {
+    if (action === "rename") {
+      const name = prompt("设备名称", device?.name || deviceId);
+      if (!name?.trim()) return;
+      await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ userId, name: name.trim() })
+      });
+    } else if (action === "rotate") {
+      const result = await api(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, {
+        method: "POST",
+        body: JSON.stringify({ userId })
+      });
+      showDeviceCommand(result.command);
+      showToast("令牌已轮换；旧令牌立即失效");
+    } else if (action === "toggle") {
+      await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ userId, enabled: !(device?.enabled && !device?.revoked) })
+      });
+    }
+    await refreshDeviceSettings();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function showDeviceCommand(command) {
+  $("#deviceCommandOutput").value = command || "";
+  $("#deviceCommandField").hidden = false;
+  $("#deviceCommandOutput").focus();
+  $("#deviceCommandOutput").select();
 }
 
 function fillSettingsForm(config) {

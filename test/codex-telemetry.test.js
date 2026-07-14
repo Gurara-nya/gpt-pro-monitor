@@ -2,7 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { parseRolloutLines, usageDelta } = require("../lib/codex-telemetry");
+const { eventIdentity, parseRolloutLines, threadHash, usageDelta } = require("../lib/codex-telemetry");
+const { eventId: agentEventId } = require("../device-agent");
 
 function line(type, payload, timestamp = "2026-07-14T01:00:00.000Z") {
   return JSON.stringify({ type, timestamp, payload });
@@ -66,4 +67,9 @@ test("reasoning output stays a subset and does not increase total tokens", async
   assert.equal(record.usageSplit.total_tokens, 100);
   assert.equal(record.usageSplit.output_tokens, 20);
   assert.equal(record.usageSplit.reasoning_output_tokens, 15);
+});
+
+test("local and remote collectors derive the same device-independent event ID", () => {
+  const cumulative = { input_tokens: 80, cached_input_tokens: 20, output_tokens: 20, reasoning_output_tokens: 10, total_tokens: 100 };
+  assert.equal(eventIdentity("thread-shared", cumulative), agentEventId(threadHash("thread-shared"), cumulative));
 });

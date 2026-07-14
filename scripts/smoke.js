@@ -42,10 +42,20 @@ async function main() {
 
   const userId = state.config.activeUsageUserId;
   const usage = await request(`/api/codex-usage?userId=${encodeURIComponent(userId)}`);
-  if (usage.report) assert.equal(usage.report.sessions, undefined);
+  if (usage.report) {
+    assert.equal(usage.report.sessions, undefined);
+    assert.equal(usage.report.device_views, undefined);
+    assert.equal(Array.isArray(usage.report.device_breakdown), true);
+  }
+
+  const devices = await request(`/api/devices?userId=${encodeURIComponent(userId)}`);
+  assert.equal(Array.isArray(devices.devices), true);
+  assert.equal(devices.devices.some((device) => device.builtIn), true);
+  const localUsage = await request(`/api/codex-usage?userId=${encodeURIComponent(userId)}&deviceId=local`);
+  if (localUsage.report) assert.equal(localUsage.report.selected_device_id, "local");
 
   const sessions = await request(
-    `/api/codex-usage/sessions?userId=${encodeURIComponent(userId)}&sort=tokens_desc&page=1&pageSize=2`
+    `/api/codex-usage/sessions?userId=${encodeURIComponent(userId)}&deviceId=all&sort=tokens_desc&page=1&pageSize=2`
   );
   assert.equal(Array.isArray(sessions.items), true);
   assert.equal(Array.isArray(sessions.months), true);
@@ -58,6 +68,32 @@ async function main() {
   assert.equal(typeof exported.config.account.label, "string");
   assert.equal(Array.isArray(exported.config.usageUsers), true);
   assert.equal(Array.isArray(exported.checks), true);
+
+  let smokeDevice;
+  try {
+    smokeDevice = await request("/api/devices", {
+      method: "POST",
+      body: JSON.stringify({ userId, name: `smoke-${Date.now()}` })
+    });
+    assert.equal(typeof smokeDevice.token, "string");
+    const ingestResponse = await fetch(`${baseUrl}/api/device-ingest/v1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${smokeDevice.token}` },
+      body: JSON.stringify({ schemaVersion: 1, userId, batchId: `smoke-${Date.now()}`, cursor: "smoke", events: [], snapshots: [] })
+    });
+    assert.equal(ingestResponse.ok, true, `device ingest returned ${ingestResponse.status}`);
+    const ingest = await ingestResponse.json();
+    assert.equal(ingest.accepted, 0);
+    const exportWithDevice = await request("/api/export");
+    assert.equal(JSON.stringify(exportWithDevice).includes(smokeDevice.token), false);
+  } finally {
+    if (smokeDevice?.device?.id) {
+      await request(`/api/devices/${encodeURIComponent(smokeDevice.device.id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ userId })
+      });
+    }
+  }
 
   const html = await fetch(baseUrl, { headers: authHeaders() }).then((response) => response.text());
   assert.match(html, /GPT Pro Monitor/);

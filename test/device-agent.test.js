@@ -1,0 +1,41 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { scanFile } = require("../device-agent");
+
+function row(type, payload, timestamp = "2026-07-14T00:00:00Z") {
+  return JSON.stringify({ type, timestamp, payload });
+}
+
+function token(total, input, output, timestamp) {
+  return row("event_msg", {
+    type: "token_count",
+    info: { total_token_usage: { input_tokens: input, cached_input_tokens: Math.floor(input / 2), output_tokens: output, reasoning_output_tokens: 1, total_tokens: total } }
+  }, timestamp);
+}
+
+test("device agent performs a full scan once and then reads only appended bytes", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gpt-monitor-agent-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "rollout-2026-07-14T00-00-00-thread-agent.jsonl");
+  await fs.writeFile(file, [
+    row("session_meta", { id: "thread-agent", cwd: "C:/private", title: "secret" }),
+    row("turn_context", { model: "gpt-5.6-luna" }),
+    token(100, 80, 20, "2026-07-14T00:01:00Z")
+  ].join("\n") + "\n");
+  const first = await scanFile(file);
+  assert.equal(first.events.length, 1);
+  assert.equal(first.events[0].usage.total_tokens, 100);
+  assert.equal(first.events[0].cwd, undefined);
+  assert.equal(first.events[0].title, undefined);
+
+  await fs.appendFile(file, token(150, 120, 30, "2026-07-14T00:02:00Z") + "\n");
+  const second = await scanFile(file, first.cursor);
+  assert.equal(second.events.length, 1);
+  assert.equal(second.events[0].usage.total_tokens, 50);
+  assert.equal(second.cursor.offset, (await fs.stat(file)).size);
+});

@@ -81,6 +81,7 @@
             </div>
             <div class="token-actions">
               <select id="usageUserSelect" aria-label="选择数据用户"></select>
+              <select id="deviceSelect" aria-label="选择设备"><option value="all">全部设备</option></select>
               <select id="codexMonthSelect" aria-label="选择 Token 月份"></select>
               <button class="icon-button quiet" id="codexUsageRefreshButton" type="button" aria-label="刷新 Token 数据" title="刷新 Token 数据">
                 <i data-lucide="refresh-cw"></i>
@@ -132,6 +133,14 @@
               </div>
             </div>
             <p class="token-cost-note" id="codexCostNote">API 等价成本按 OpenAI 官方输入/缓存输入/输出价格估算，不是 ChatGPT 套餐账单。</p>
+
+            <section class="device-breakdown" aria-label="设备用量占比">
+              <div class="device-breakdown-head">
+                <div><p>Devices</p><h3>设备用量占比</h3></div>
+                <small>主口径为总 Token；成本占比使用混合估算中点</small>
+              </div>
+              <div class="device-breakdown-list" id="deviceBreakdownList"></div>
+            </section>
 
             <div class="token-breakdowns">
               <section class="token-daily" aria-label="日消耗">
@@ -309,6 +318,23 @@
                 <span>启用 Sub2API</span>
               </label>
               <button class="text-button" id="sub2ApiKeySaveButton" type="button">保存 Key 并刷新</button>
+            </div>
+          </section>
+
+          <section>
+            <h3>远端设备采集</h3>
+            <div class="form-grid">
+              <label>
+                <span>新设备名称</span>
+                <input id="newDeviceName" autocomplete="off" placeholder="Laptop" />
+              </label>
+              <button class="text-button" id="createDeviceButton" type="button">创建设备</button>
+              <div class="device-settings-list wide" id="deviceSettingsList"></div>
+              <label class="wide" id="deviceCommandField" hidden>
+                <span>一次性接入命令（请立即保存）</span>
+                <textarea id="deviceCommandOutput" rows="4" readonly></textarea>
+              </label>
+              <small class="wide">采集端只上传不可逆线程哈希、事件哈希、时间、模型和 Token，不上传标题、目录、提示词、回复或代码。默认每 15 分钟同步。</small>
             </div>
           </section>
 
