@@ -112,9 +112,27 @@ test("event ownership survives copies and preserves the initial local migration"
 test("token rotation invalidates the old token and revocation blocks ingest", async (t) => {
   const registry = await registryFixture(t);
   const created = await registry.create("Laptop");
+  await registry.ingest(created.token, batch("installed-old", [], "installed-old", {
+    version: "2.1.0", platform: "win32", nodeVersion: "v22.17.0", installed: true
+  }));
+  assert.equal((await registry.list()).find((device) => device.id === created.device.id).agentInstalled, true);
   const rotated = await registry.rotate(created.device.id);
+  const awaitingInstall = (await registry.list()).find((device) => device.id === created.device.id);
+  assert.equal(awaitingInstall.agentInstalled, false);
+  assert.equal(awaitingInstall.installConfirmedAt, null);
   await assert.rejects(() => registry.ingest(created.token, batch("old", [])), /Invalid or revoked/);
-  assert.equal((await registry.ingest(rotated.token, batch("new", []))).accepted, 0);
+  assert.equal((await registry.ingest(rotated.token, batch("new-bootstrap", [], "new-bootstrap", {
+    version: "2.1.1", platform: "win32", nodeVersion: "v22.17.0", installed: false
+  }))).accepted, 0);
+  assert.equal((await registry.list()).find((device) => device.id === created.device.id).agentInstalled, false);
+  await registry.ingest(rotated.token, batch("new-installed", [], "new-installed", {
+    version: "2.1.1", platform: "win32", nodeVersion: "v22.17.0", installed: true
+  }));
+  const installed = (await registry.list()).find((device) => device.id === created.device.id);
+  assert.equal(installed.agentInstalled, true);
+  assert.equal(new Date(installed.installConfirmedAt) >= new Date(rotated.device.tokenCreatedAt), true);
+  await registry.ingest(rotated.token, batch("legacy-no-agent", []));
+  assert.equal((await registry.list()).find((device) => device.id === created.device.id).agentInstalled, true);
   await registry.patch(created.device.id, { enabled: false });
   await assert.rejects(() => registry.ingest(rotated.token, batch("revoked", [])), /Invalid or revoked/);
 });

@@ -1555,13 +1555,13 @@ function renderDeviceSettings() {
       <dl class="device-settings-meta">
         <div><dt>Token</dt><dd>${escapeHtml(formatCompactTokens(device.total_tokens))}</dd></div>
         <div><dt>采集器</dt><dd>${escapeHtml(device.builtIn ? "内置" : device.agentVersion ? `v${device.agentVersion} · ${platformLabel(device.agentPlatform)}` : "--")}</dd></div>
-        <div><dt>运行方式</dt><dd>${escapeHtml(device.builtIn ? "服务端" : device.agentInstalled ? "自动运行" : device.lastSeenAt ? "手动运行" : "--")}</dd></div>
+        <div><dt>运行方式</dt><dd>${escapeHtml(device.builtIn ? "服务端" : device.agentInstalled ? "自动运行" : device.lastSeenAt ? "安装未完成" : "待安装")}</dd></div>
       </dl>
       <div class="device-settings-actions">
         ${device.builtIn
           ? `<button class="text-button" type="button" data-device-action="rename">改名</button>`
           : `
-            <button class="filled-button device-sync-action" type="button" data-device-action="sync">同步命令</button>
+            <button class="filled-button device-sync-action" type="button" data-device-action="${device.agentInstalled ? "sync" : "install"}">${device.agentInstalled ? "手动同步" : device.lastSeenAt ? "继续安装" : "开始接入"}</button>
             <details class="device-more-actions">
               <summary class="text-button">更多</summary>
               <div class="device-more-menu">
@@ -1616,19 +1616,19 @@ async function manageDevice(deviceId, action) {
       });
     } else if (action === "sync") {
       const command = device?.agentPlatform === "win32"
-        ? `node "$HOME\\.gpt-monitor\\device-agent.js" --once`
+        ? `node (Join-Path $HOME '.gpt-monitor\\device-agent.js') --once`
         : `node "$HOME/.gpt-monitor/device-agent.js" --once`;
       await copyText(command);
-      showToast("手动同步命令已复制");
+      showToast(device?.agentPlatform === "win32" ? "PowerShell 同步命令已复制" : "同步命令已复制");
       return;
-    } else if (action === "rotate") {
-      if (device?.lastSeenAt && !confirm(`重新接入“${device.name || deviceId}”会让旧命令立即失效，是否继续？`)) return;
+    } else if (action === "install" || action === "rotate") {
+      if (action === "rotate" && device?.lastSeenAt && !confirm(`重新接入“${device.name || deviceId}”会让旧命令立即失效，是否继续？`)) return;
       const result = await api(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, {
         method: "POST",
         body: JSON.stringify({ userId })
       });
       showDeviceCommand(result);
-      showToast("已生成新的接入命令；旧令牌已失效");
+      showToast(action === "install" ? "新安装命令已生成；旧命令已失效" : "已生成新的接入命令；旧令牌已失效");
     } else if (action === "toggle") {
       if (device?.enabled && !device?.revoked && !confirm(`停用“${device.name || deviceId}”后将拒绝它继续上传，是否继续？`)) return;
       await api(`/api/devices/${encodeURIComponent(deviceId)}`, {
@@ -1652,6 +1652,7 @@ function deviceState(device) {
   if (device.builtIn) return { label: "本机", className: "local" };
   if (device.revoked || !device.enabled) return { label: "已停用", className: "disabled" };
   if (!device.lastSeenAt) return { label: "待接入", className: "pending" };
+  if (!device.agentInstalled) return { label: "安装未完成", className: "pending" };
   if (device.stale) return { label: "同步中断", className: "stale" };
   return { label: "同步正常", className: "online" };
 }
@@ -1733,14 +1734,21 @@ function startDeviceOnboardingPoll() {
     const devices = await refreshDeviceSettings();
     const device = devices.find((item) => item.id === deviceOnboardingDeviceId);
     const syncedAfterToken = device?.lastSeenAt && new Date(device.lastSeenAt) >= new Date(deviceOnboardingTokenCreatedAt);
-    if (syncedAfterToken) {
+    const installedAfterToken = device?.installConfirmedAt &&
+      new Date(device.installConfirmedAt) >= new Date(deviceOnboardingTokenCreatedAt);
+    if (syncedAfterToken && installedAfterToken && device?.agentInstalled) {
       $("#deviceOnboardingBadge").textContent = "接入成功";
       $("#deviceOnboardingStatus").textContent = `首次同步完成 · ${relativeDeviceTime(device.lastSeenAt)}`;
       showToast(`${device.name || "新设备"}已开始自动同步`);
       refreshCodexUsage({ quiet: true });
       return;
     }
-    $("#deviceOnboardingStatus").textContent = "正在等待新设备，运行命令后通常数秒内上线";
+    if (syncedAfterToken) {
+      $("#deviceOnboardingBadge").textContent = "正在安装";
+      $("#deviceOnboardingStatus").textContent = "已收到数据，正在完成首次导入和自启动，请勿关闭终端";
+    } else {
+      $("#deviceOnboardingStatus").textContent = "正在等待新设备，运行命令后通常数秒内上线";
+    }
     deviceOnboardingPollTimer = setTimeout(poll, 5000);
   };
   deviceOnboardingPollTimer = setTimeout(poll, 2500);

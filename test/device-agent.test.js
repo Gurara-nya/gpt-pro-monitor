@@ -5,7 +5,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { AGENT_VERSION, agentMetadata, retryDelayMs, scanFile, systemdQuote } = require("../device-agent");
+const {
+  AGENT_VERSION,
+  agentMetadata,
+  installAgentFile,
+  installConfiguredAgent,
+  linuxAutostartCommands,
+  retryDelayMs,
+  scanFile,
+  systemdQuote,
+  windowsAutostartCommand
+} = require("../device-agent");
 
 function row(type, payload, timestamp = "2026-07-14T00:00:00Z") {
   return JSON.stringify({ type, timestamp, payload });
@@ -58,7 +68,7 @@ test("device agent keeps the filename thread ID and uploads hashed fork lineage"
 });
 
 test("device agent exposes install metadata and bounded retry delays", () => {
-  assert.equal(AGENT_VERSION, "2.1.0");
+  assert.equal(AGENT_VERSION, "2.1.1");
   assert.equal(agentMetadata().version, AGENT_VERSION);
   assert.equal(typeof agentMetadata().platform, "string");
   assert.equal(retryDelayMs(1), 60_000);
@@ -66,4 +76,49 @@ test("device agent exposes install metadata and bounded retry delays", () => {
   assert.equal(retryDelayMs(3), 900_000);
   assert.equal(retryDelayMs(99), 900_000);
   assert.equal(systemdQuote('/tmp/a "b"'), '"/tmp/a \\"b\\""');
+});
+
+test("device agent writes the installed script before a slow or failed first sync", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gpt-monitor-agent-install-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "downloaded-agent.js");
+  const installed = path.join(root, ".gpt-monitor", "device-agent.js");
+  await fs.writeFile(source, "console.log('agent');\n");
+  await installAgentFile(source, installed);
+  assert.equal(await fs.readFile(installed, "utf8"), "console.log('agent');\n");
+
+  const calls = [];
+  await assert.rejects(installConfiguredAgent({}, {
+    copyAgent: async () => { calls.push("copy"); },
+    syncNow: async () => { calls.push("sync"); throw new Error("offline"); },
+    enableAutostart: async () => { calls.push("autostart"); }
+  }), /offline/);
+  assert.deepEqual(calls, ["copy", "sync"]);
+});
+
+test("device agent enables autostart only after the initial sync succeeds", async () => {
+  const calls = [];
+  await installConfiguredAgent({}, {
+    copyAgent: async () => { calls.push("copy"); },
+    syncNow: async () => { calls.push("sync"); },
+    enableAutostart: async () => { calls.push("autostart"); }
+  });
+  assert.deepEqual(calls, ["copy", "sync", "autostart"]);
+});
+
+test("agent upgrades restart existing Windows and Linux background services", () => {
+  const windows = windowsAutostartCommand();
+  const stop = windows.indexOf("Stop-ScheduledTask");
+  const register = windows.indexOf("Register-ScheduledTask");
+  const start = windows.indexOf("Start-ScheduledTask");
+  assert.equal(stop >= 0 && stop < register && register < start, true);
+  assert.match(windows, /\$ErrorActionPreference='Stop'/);
+  assert.match(windows, /Register-ScheduledTask[^;]+-ErrorAction Stop/);
+  assert.match(windows, /Start-ScheduledTask[^;]+-ErrorAction Stop/);
+  assert.match(windows, /task did not stay running/);
+  assert.deepEqual(linuxAutostartCommands(), [
+    ["--user", "daemon-reload"],
+    ["--user", "enable", "gpt-monitor-agent.service"],
+    ["--user", "restart", "gpt-monitor-agent.service"]
+  ]);
 });

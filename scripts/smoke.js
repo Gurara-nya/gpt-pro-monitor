@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 
 const baseUrl = (process.env.GPT_MONITOR_BASE_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
+const origin = new URL(baseUrl).origin;
 const accessSecret = process.env.GPT_MONITOR_ACCESS_TOKEN || process.env.GPT_MONITOR_PASSWORD || "";
 const accessUser = process.env.GPT_MONITOR_USERNAME || "monitor";
 
@@ -78,6 +79,7 @@ async function main() {
   assert.equal(Array.isArray(exported.checks), true);
 
   let smokeDevice;
+  let aliasSmokeDevice;
   try {
     smokeDevice = await request("/api/devices", {
       method: "POST",
@@ -92,14 +94,14 @@ async function main() {
       { headers: { Authorization: `Bearer ${smokeDevice.token}` } }
     );
     assert.equal(agentDownload.ok, true, `authenticated agent download returned ${agentDownload.status}`);
-    assert.equal(agentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.0");
-    assert.match(await agentDownload.text(), /AGENT_VERSION = "2\.1\.0"/);
+    assert.equal(agentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.1");
+    assert.match(await agentDownload.text(), /AGENT_VERSION = "2\.1\.1"/);
     const aliasAgentDownload = await fetch(
       `${new URL(baseUrl).origin}/monitor/api/device-agent/v1?userId=${encodeURIComponent(userId)}`,
       { cache: "no-store", headers: { Authorization: `Bearer ${smokeDevice.token}` } }
     );
     assert.equal(aliasAgentDownload.ok, true, `subpath agent download returned ${aliasAgentDownload.status}`);
-    assert.equal(aliasAgentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.0");
+    assert.equal(aliasAgentDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.1");
     const rejectedDownload = await fetch(`${baseUrl}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`);
     assert.equal(rejectedDownload.status, 401);
     const ingestResponse = await fetch(`${baseUrl}/api/device-ingest/v1`, {
@@ -126,9 +128,35 @@ async function main() {
     assert.equal(ingestedDevice.agentInstalled, true);
     const exportWithDevice = await request("/api/export");
     assert.equal(JSON.stringify(exportWithDevice).includes(smokeDevice.token), false);
+
+    const aliasCreateResponse = await fetch(`${origin}/monitor/api/devices`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ userId, name: `smoke-alias-${Date.now()}` })
+    });
+    assert.equal(aliasCreateResponse.ok, true, `/monitor/api/devices returned ${aliasCreateResponse.status}`);
+    aliasSmokeDevice = await aliasCreateResponse.json();
+    for (const command of [aliasSmokeDevice.commands.windows, aliasSmokeDevice.commands.unix]) {
+      assert.match(command, /\/monitor\/api\/device-agent\/v1\?userId=/);
+      assert.match(command, /--url ["']https?:\/\/[^"']+\/monitor["']/);
+      assert.doesNotMatch(command, /\/monitor\/monitor/);
+    }
+    const aliasCommandDownload = await fetch(
+      `${origin}/monitor/api/device-agent/v1?userId=${encodeURIComponent(userId)}`,
+      { headers: { Authorization: `Bearer ${aliasSmokeDevice.token}` } }
+    );
+    assert.equal(aliasCommandDownload.ok, true, `alias command download returned ${aliasCommandDownload.status}`);
+    assert.equal(aliasCommandDownload.headers.get("x-gpt-monitor-agent-version"), "2.1.1");
   } finally {
     if (smokeDevice?.device?.id) {
       await request(`/api/devices/${encodeURIComponent(smokeDevice.device.id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ userId })
+      });
+    }
+    if (aliasSmokeDevice?.device?.id) {
+      await request(`/api/devices/${encodeURIComponent(aliasSmokeDevice.device.id)}`, {
         method: "DELETE",
         body: JSON.stringify({ userId })
       });
@@ -147,13 +175,18 @@ async function main() {
   assert.match(agentResponse.headers.get("content-disposition") || "", /device-agent\.js/);
   assert.match(await agentResponse.text(), /device-agent-state\.json/);
 
-  const origin = new URL(baseUrl).origin;
   const aliasResponse = await fetch(`${origin}/monitor/`, { headers: authHeaders() });
   assert.equal(aliasResponse.ok, true, `/monitor/ returned ${aliasResponse.status}`);
   assert.match(await aliasResponse.text(), /GPT Pro Monitor/);
   const aliasHelpResponse = await fetch(`${origin}/monitor/help`, { headers: authHeaders() });
   assert.equal(aliasHelpResponse.ok, true, `/monitor/help returned ${aliasHelpResponse.status}`);
-  assert.match(await aliasHelpResponse.text(), /data-page="device-help"/);
+  const aliasHelpHtml = await aliasHelpResponse.text();
+  assert.match(aliasHelpHtml, /data-page="device-help"/);
+  const aliasDownloadHref = aliasHelpHtml.match(/href="([^"]*downloads\/device-agent\.js)"/)?.[1];
+  assert.equal(typeof aliasDownloadHref, "string");
+  const aliasDownloadResponse = await fetch(new URL(aliasDownloadHref, `${origin}/monitor/help`), { headers: authHeaders() });
+  assert.equal(aliasDownloadResponse.ok, true, `help agent download returned ${aliasDownloadResponse.status}`);
+  assert.equal(aliasDownloadResponse.headers.get("x-gpt-monitor-agent-version"), "2.1.1");
 
   if (accessSecret) {
     const unauthorized = await fetch(`${baseUrl}/api/state`);

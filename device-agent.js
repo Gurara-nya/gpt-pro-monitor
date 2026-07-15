@@ -12,7 +12,7 @@ const AGENT_HOME = path.join(os.homedir(), ".gpt-monitor");
 const CONFIG_FILE = path.join(AGENT_HOME, "device-agent.json");
 const STATE_FILE = path.join(AGENT_HOME, "device-agent-state.json");
 const INSTALLED_AGENT_FILE = path.join(AGENT_HOME, "device-agent.js");
-const AGENT_VERSION = "2.1.0";
+const AGENT_VERSION = "2.1.1";
 const WINDOWS_TASK_NAME = "GPT Monitor Device Agent";
 const LINUX_SERVICE_FILE = path.join(os.homedir(), ".config", "systemd", "user", "gpt-monitor-agent.service");
 const MACOS_PLIST_FILE = path.join(os.homedir(), "Library", "LaunchAgents", "com.gpt-monitor.device-agent.plist");
@@ -156,31 +156,48 @@ function ensureSupportedNode() {
   }
 }
 
-async function installAgentFile() {
-  await atomicFile(INSTALLED_AGENT_FILE, await fsp.readFile(__filename), 0o700);
+async function installAgentFile(sourceFile = __filename, targetFile = INSTALLED_AGENT_FILE) {
+  await atomicFile(targetFile, await fsp.readFile(sourceFile), 0o700);
 }
 
-function installWindowsAutostart() {
+function windowsAutostartCommand() {
   const taskArgument = `"${INSTALLED_AGENT_FILE}"`;
-  const command = [
+  return [
+    "$ErrorActionPreference='Stop'",
+    `$existing=Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue`,
+    `if ($existing -and $existing.State -eq 'Running') { Stop-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction Stop; $deadline=(Get-Date).AddSeconds(10); do { Start-Sleep -Milliseconds 200; $existing=Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction Stop } while ($existing.State -eq 'Running' -and (Get-Date) -lt $deadline); if ($existing.State -eq 'Running') { throw 'Timed out stopping the previous GPT Monitor Device Agent task.' } }`,
     `$action = New-ScheduledTaskAction -Execute ${psQuote(process.execPath)} -Argument ${psQuote(taskArgument)} -WorkingDirectory ${psQuote(AGENT_HOME)}`,
     "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME",
     "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)",
     "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited",
-    `Register-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Uploads Codex token telemetry to GPT Monitor.' -Force | Out-Null`,
-    `Start-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)}`
+    `Register-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Uploads Codex token telemetry to GPT Monitor.' -Force -ErrorAction Stop | Out-Null`,
+    `Start-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction Stop`,
+    `$deadline=(Get-Date).AddSeconds(10); do { Start-Sleep -Milliseconds 200; $state=(Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction Stop).State } while ($state -eq 'Queued' -and (Get-Date) -lt $deadline); if ($state -ne 'Running') { throw "GPT Monitor Device Agent task did not stay running (state: $state)." }`
   ].join("; ");
+}
+
+function installWindowsAutostart() {
+  const command = windowsAutostartCommand();
   execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", command], {
     stdio: "inherit",
     windowsHide: true
   });
 }
 
+function linuxAutostartCommands() {
+  return [
+    ["--user", "daemon-reload"],
+    ["--user", "enable", "gpt-monitor-agent.service"],
+    ["--user", "restart", "gpt-monitor-agent.service"]
+  ];
+}
+
 async function installLinuxAutostart() {
   const unit = `[Unit]\nDescription=GPT Monitor Device Agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=${systemdQuote(process.execPath)} ${systemdQuote(INSTALLED_AGENT_FILE)}\nRestart=always\nRestartSec=60\n\n[Install]\nWantedBy=default.target\n`;
   await atomicFile(LINUX_SERVICE_FILE, unit, 0o600);
-  execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
-  execFileSync("systemctl", ["--user", "enable", "--now", "gpt-monitor-agent.service"], { stdio: "inherit" });
+  for (const command of linuxAutostartCommands()) {
+    execFileSync("systemctl", command, { stdio: "inherit" });
+  }
 }
 
 async function installMacosAutostart() {
@@ -192,12 +209,22 @@ async function installMacosAutostart() {
   execFileSync("launchctl", ["bootstrap", `gui/${process.getuid()}`, MACOS_PLIST_FILE], { stdio: "inherit" });
 }
 
-async function installAutostart() {
-  await installAgentFile();
+async function installAutostart({ copyAgent = true } = {}) {
+  if (copyAgent) await installAgentFile();
   if (process.platform === "win32") installWindowsAutostart();
   else if (process.platform === "linux") await installLinuxAutostart();
   else if (process.platform === "darwin") await installMacosAutostart();
   else throw new Error(`暂不支持自动安装：${process.platform}`);
+}
+
+async function installConfiguredAgent(config, operations = {}) {
+  const copyAgent = operations.copyAgent || installAgentFile;
+  const syncNow = operations.syncNow || sync;
+  const enableAutostart = operations.enableAutostart || (() => installAutostart({ copyAgent: false }));
+  await copyAgent();
+  operations.onPrepared?.();
+  await syncNow(config);
+  await enableAutostart();
 }
 
 async function uninstallAutostart(purge = false) {
@@ -466,9 +493,21 @@ async function main() {
   const config = await configure(cli);
 
   if (cli.install) {
-    console.log("[device-agent] 正在测试连接并导入现有用量…");
-    await sync(config);
-    await installAutostart();
+    console.log("[device-agent] 正在保存采集器并导入现有用量…");
+    let prepared = false;
+    try {
+      await installConfiguredAgent(config, {
+        onPrepared: () => {
+          prepared = true;
+          console.log(`[device-agent] 采集器已保存到 ${INSTALLED_AGENT_FILE}`);
+        }
+      });
+    } catch (error) {
+      console.error(prepared
+        ? `[device-agent] 安装尚未完成；采集器已保留在 ${INSTALLED_AGENT_FILE}，请修复网络后重新运行安装命令。`
+        : `[device-agent] 无法写入采集器安装目录 ${INSTALLED_AGENT_FILE}。`);
+      throw error;
+    }
     console.log(`[device-agent] 安装完成；已启用自动运行，每 ${config.intervalMinutes} 分钟同步一次。`);
     return;
   }
@@ -501,6 +540,9 @@ module.exports = {
   AGENT_VERSION,
   agentMetadata,
   eventId,
+  installAgentFile,
+  installConfiguredAgent,
+  linuxAutostartCommands,
   normalizeUsage,
   parentThreadId,
   retryDelayMs,
@@ -508,5 +550,6 @@ module.exports = {
   sync,
   systemdQuote,
   usageStateId,
-  usageDelta
+  usageDelta,
+  windowsAutostartCommand
 };

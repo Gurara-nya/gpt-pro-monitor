@@ -203,9 +203,9 @@ function pathMatchesBasePath(pathname, basePath) {
   return Boolean(basePath) && (pathname === basePath || pathname.startsWith(`${basePath}/`));
 }
 
-function matchingBasePath(pathname) {
+function matchingBasePath(pathname, configuredBasePath = getBasePath()) {
   const pathValue = String(pathname || "/") || "/";
-  const configured = getBasePath();
+  const configured = normalizeBasePath(configuredBasePath);
   if (pathMatchesBasePath(pathValue, configured)) return configured;
   return BASE_PATH_ALIASES.find((alias) => pathMatchesBasePath(pathValue, alias)) || "";
 }
@@ -3841,7 +3841,8 @@ function sendUnauthorized(res) {
 }
 
 function requestOrigin(req) {
-  const host = req.headers.host;
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || req.headers.host;
   if (!host) return null;
   const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
   const proto = forwardedProto || (req.socket.encrypted ? "https" : "http");
@@ -4047,10 +4048,34 @@ function deviceBearerToken(req) {
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
 }
 
+function resolveMonitorPublicUrl({ configuredUrl, origin, requestPathname, configuredBasePath = "" } = {}) {
+  const configured = String(configuredUrl || "").trim();
+  const fallbackOrigin = String(origin || `http://${DEFAULT_HOST}:${DEFAULT_PORT}`).trim();
+  const source = configured && isValidHttpUrl(configured) ? configured : fallbackOrigin;
+  if (!isValidHttpUrl(source)) return `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
+
+  const parsed = new URL(source);
+  const configuredPath = normalizeBasePath(parsed.pathname);
+  const requestBasePath = matchingBasePath(requestPathname, configuredBasePath) || normalizeBasePath(configuredBasePath);
+  // GPT_MONITOR_PUBLIC_URL may be either an origin or the complete external app URL.
+  // A non-root path is therefore authoritative; only an origin gets the detected base path appended.
+  parsed.pathname = configuredPath || requestBasePath || "/";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/+$/, "");
+}
+
 function monitorPublicUrl(req) {
-  const configured = String(process.env.GPT_MONITOR_PUBLIC_URL || "").trim().replace(/\/+$/, "");
-  if (configured && isValidHttpUrl(configured)) return configured;
-  return requestOrigin(req) || `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
+  let requestPathname = "/";
+  try {
+    requestPathname = new URL(req.url || "/", "http://localhost").pathname;
+  } catch {}
+  return resolveMonitorPublicUrl({
+    configuredUrl: process.env.GPT_MONITOR_PUBLIC_URL,
+    origin: requestOrigin(req),
+    requestPathname,
+    configuredBasePath: getBasePath()
+  });
 }
 
 function powershellLiteral(value) {
@@ -4061,25 +4086,33 @@ function shellLiteral(value) {
   return `'${String(value || "").replace(/'/g, `'"'"'`)}'`;
 }
 
-function deviceAgentCommands(req, userId, deviceId, token) {
-  const url = `${monitorPublicUrl(req)}${getBasePath()}`.replace(/\/+$/, "");
-  const downloadUrl = `${url}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`;
-  const args = `--url ${JSON.stringify(url)} --user ${JSON.stringify(userId)} --device ${JSON.stringify(deviceId)} --token ${JSON.stringify(token)} --install`;
+function buildDeviceAgentCommands(url, userId, deviceId, token) {
+  const baseUrl = String(url || "").replace(/\/+$/, "");
+  const downloadUrl = `${baseUrl}/api/device-agent/v1?userId=${encodeURIComponent(userId)}`;
+  const args = `--url ${JSON.stringify(baseUrl)} --user ${JSON.stringify(userId)} --device ${JSON.stringify(deviceId)} --token ${JSON.stringify(token)} --install`;
   const powershell = [
-    `$p=Join-Path $env:TEMP 'gpt-monitor-agent.js'`,
-    `Invoke-WebRequest -UseBasicParsing -Uri ${powershellLiteral(downloadUrl)} -Headers @{Authorization=${powershellLiteral(`Bearer ${token}`)}} -OutFile $p`,
-    `node $p ${args}`
+    "$ErrorActionPreference='Stop'",
+    `$p=Join-Path $env:TEMP ('gpt-monitor-agent-' + [guid]::NewGuid().ToString('N') + '.js')`,
+    "try {",
+    `Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri ${powershellLiteral(downloadUrl)} -Headers @{Authorization=${powershellLiteral(`Bearer ${token}`)}} -OutFile $p`,
+    `& node $p ${args}`,
+    `if ($LASTEXITCODE -ne 0) { throw "Device Agent exited with code $LASTEXITCODE" }`,
+    `} finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }`
   ].join("; ");
   const unix = [
     `p=\"\${TMPDIR:-/tmp}/gpt-monitor-agent.js\"`,
     `curl -fsSL -H ${shellLiteral(`Authorization: Bearer ${token}`)} ${shellLiteral(downloadUrl)} -o \"$p\"`,
-    `node \"$p\" --url ${shellLiteral(url)} --user ${shellLiteral(userId)} --device ${shellLiteral(deviceId)} --token ${shellLiteral(token)} --install`
+    `node \"$p\" --url ${shellLiteral(baseUrl)} --user ${shellLiteral(userId)} --device ${shellLiteral(deviceId)} --token ${shellLiteral(token)} --install`
   ].join(" && ");
   return {
     windows: powershell,
     unix,
-    manual: `node device-agent.js ${args}`
+    manual: `node ./device-agent.js ${args}`
   };
+}
+
+function deviceAgentCommands(req, userId, deviceId, token) {
+  return buildDeviceAgentCommands(monitorPublicUrl(req), userId, deviceId, token);
 }
 
 async function listDeviceState(userId) {
@@ -4339,6 +4372,7 @@ if (require.main === module) {
 module.exports = {
   aggregateSplitCost,
   attributeLocalSessions,
+  buildDeviceAgentCommands,
   capTelemetryEvents,
   codexUsageSplitCoverage,
   costEstimateForTokens,
@@ -4353,6 +4387,7 @@ module.exports = {
   getCodexUsageState,
   generateCodexUsageHtmlReport,
   mergeDeviceState,
+  resolveMonitorPublicUrl,
   reconcileCodexUsageDetails,
   reconcileRemoteDeviceUsage
 };
