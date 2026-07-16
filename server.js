@@ -74,7 +74,9 @@ const DEFAULT_CODEX_USAGE = {
   uploadedFileName: "",
   uploadedAt: null,
   topSessions: 10,
-  pricingOverrides: []
+  pricingOverrides: [],
+  forkReviewMode: "assisted",
+  forkDecisions: []
 };
 const DEFAULT_SUB2API = {
   enabled: false,
@@ -363,7 +365,36 @@ function normalizeCodexUsageConfig(input) {
     uploadedFileName: cleanString(source.uploadedFileName, "", 240),
     uploadedAt: validIsoOrNull(source.uploadedAt),
     topSessions: clamp(Math.round(toNumber(source.topSessions, DEFAULT_CODEX_USAGE.topSessions)), 1, 50),
-    pricingOverrides: normalizePricingOverrides(source.pricingOverrides)
+    pricingOverrides: normalizePricingOverrides(source.pricingOverrides),
+    forkReviewMode: source.forkReviewMode === "automatic" ? "automatic" : "assisted",
+    forkDecisions: normalizeForkDecisions(source.forkDecisions)
+  };
+}
+
+function normalizeForkDecisions(input) {
+  const source = Array.isArray(input) ? input : [];
+  const byRelation = new Map();
+  for (const item of source.slice(-1000)) {
+    if (!item || typeof item !== "object") continue;
+    const childThreadId = cleanString(item.childThreadId ?? item.child_thread_id, "", 256);
+    const parentThreadId = cleanString(item.parentThreadId ?? item.parent_thread_id, "", 256);
+    const action = item.action === "approve" || item.action === "reject" ? item.action : "";
+    if (!childThreadId || !parentThreadId || !action) continue;
+    byRelation.set(`${childThreadId}\u0000${parentThreadId}`, {
+      childThreadId,
+      parentThreadId,
+      action,
+      updatedAt: validIsoOrNull(item.updatedAt) || new Date(0).toISOString()
+    });
+  }
+  return [...byRelation.values()].slice(-500);
+}
+
+function forkLineageOptions(usageConfig = {}) {
+  return {
+    inferUnlinked: true,
+    reviewMode: usageConfig.forkReviewMode === "automatic" ? "automatic" : "assisted",
+    forkDecisions: normalizeForkDecisions(usageConfig.forkDecisions)
   };
 }
 
@@ -438,6 +469,40 @@ async function saveConfig(config) {
   const normalized = normalizeConfig(config);
   await writeJson(CONFIG_FILE, normalized);
   return normalized;
+}
+
+function preservePrivateUsageConfig(input, existingConfig) {
+  // Fork decisions can change while the settings dialog is open. Keep the
+  // server copy authoritative; only the dedicated decision endpoint mutates it.
+  const source = input && typeof input === "object" ? input : {};
+  const existing = existingConfig && typeof existingConfig === "object" ? existingConfig : {};
+  const merged = { ...source };
+  const existingUsers = new Map((Array.isArray(existing.usageUsers) ? existing.usageUsers : [])
+    .map((user) => [String(user?.id || "").trim(), user])
+    .filter(([id]) => id));
+
+  if (Array.isArray(source.usageUsers)) {
+    merged.usageUsers = source.usageUsers.map((user) => {
+      if (!user || typeof user !== "object") return user;
+      const current = existingUsers.get(String(user.id || "").trim());
+      const codexUsage = user.codexUsage && typeof user.codexUsage === "object" ? user.codexUsage : {};
+      if (!current) return user;
+      return {
+        ...user,
+        codexUsage: {
+          ...codexUsage,
+          forkDecisions: current.codexUsage?.forkDecisions || []
+        }
+      };
+    });
+  } else if (source.codexUsage && typeof source.codexUsage === "object") {
+    const active = getUsageUser(existing, existing.activeUsageUserId);
+    merged.codexUsage = {
+      ...source.codexUsage,
+      forkDecisions: active?.codexUsage?.forkDecisions || []
+    };
+  }
+  return merged;
 }
 
 async function loadChecks() {
@@ -711,14 +776,16 @@ function codexUsageConfigKey(user) {
   const adminPasswordPath = sub2api.adminPasswordPath ? resolveUserPath(sub2api.adminPasswordPath, "") : "";
   const deviceDir = path.join(codexUsageUserDir(user.id), "devices");
   return JSON.stringify({
-    reportSchema: "event-telemetry-v3-lineage",
+    reportSchema: "event-telemetry-v4-lineage-review",
     userId: user.id,
     codexUsage: {
       enabled: usageConfig.enabled !== false,
       dbPath,
       dbFile: fileSignature(dbPath),
       topSessions: usageConfig.topSessions,
-      pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides)
+      pricingOverrides: normalizePricingOverrides(usageConfig.pricingOverrides),
+      forkReviewMode: usageConfig.forkReviewMode,
+      forkDecisions: normalizeForkDecisions(usageConfig.forkDecisions)
     },
     devices: {
       manifest: fileSignature(path.join(deviceDir, "manifest.json")),
@@ -915,7 +982,8 @@ function publicUsageUser(user) {
       uploadedFileName: user.codexUsage?.uploadedFileName || "",
       uploadedAt: user.codexUsage?.uploadedAt || null,
       topSessions: user.codexUsage?.topSessions || DEFAULT_CODEX_USAGE.topSessions,
-      pricingOverrides: normalizePricingOverrides(user.codexUsage?.pricingOverrides)
+      pricingOverrides: normalizePricingOverrides(user.codexUsage?.pricingOverrides),
+      forkReviewMode: user.codexUsage?.forkReviewMode === "automatic" ? "automatic" : "assisted"
     },
     sub2api: {
       enabled: user.sub2api?.enabled === true,
@@ -959,8 +1027,19 @@ function compactDeviceDailyByMonth(report, requestedDevice = "all") {
         name: device.name || device.id,
         stale: Boolean(device.stale),
         points: (monthView?.days || []).map((day) => ({
-          day: day.day,
-          tokens: nonnegativeInteger(day.tokens)
+          d: Number(String(day.day || "").slice(-2)) || 0,
+          tokens: nonnegativeInteger(day.tokens),
+          usage: (() => {
+            const usage = usageSplitPayload(day.usage_split);
+            return [usage.input_tokens, usage.cached_input_tokens, usage.output_tokens];
+          })(),
+          cost: day.cost_estimate && typeof day.cost_estimate === "object"
+            ? [
+                toNumber(day.cost_estimate.low_usd, toNumber(day.cost_estimate.midpoint_usd, 0)),
+                toNumber(day.cost_estimate.high_usd, toNumber(day.cost_estimate.midpoint_usd, 0)),
+                day.cost_estimate.exact === true ? 1 : 0
+              ]
+            : null
         }))
       };
     })
@@ -980,9 +1059,16 @@ function publicCodexUsageState(result, deviceId = "all") {
     selected_device_id: requestedDevice,
     device_daily_by_month: deviceDailyByMonth
   } : { ...result.report, selected_device_id: "all", device_daily_by_month: deviceDailyByMonth };
+  if (report.token_audit && typeof report.token_audit === "object") {
+    report.token_audit = { ...report.token_audit };
+    delete report.token_audit.review_items;
+  }
   delete report.sessions;
   delete report.device_views;
   delete report.daily_top;
+  // Daily rows are already grouped under month_views[].days. Avoid returning
+  // the same cost and token split payload twice on every overview request.
+  delete report.daily;
   return {
     ...result,
     report
@@ -1136,7 +1222,7 @@ async function loadCodexTokenUsageDetails(usageConfig) {
     record.title = record.title || indexed.title;
     record.updatedAt = record.updatedAt || indexed.updatedAt;
   }
-  const lineage = deduplicateLineageRecords(rawRecords, { inferUnlinked: true });
+  const lineage = deduplicateLineageRecords(rawRecords, forkLineageOptions(usageConfig));
   const records = lineage.records.map((record) => ({
     ...record,
     tokens: record.usageSplit.total_tokens,
@@ -1277,6 +1363,8 @@ function reconcileCodexUsageDetails(report, usageDetails) {
     .reduce((sum, record) => sum + nonnegativeInteger(record.sqliteTokens), 0);
   const sharedHistoryTokens = Math.max(0, rawSqliteTokens - netTokens);
   const lineageAudit = usageDetails.lineageAudit || {};
+  const reviewItems = (lineageAudit.reviewItems || []).map((item) => forkReviewItemPayload(item, "local"));
+  const pendingForks = nonnegativeInteger(lineageAudit.pendingForks);
   report.token_audit = {
     raw_sqlite_tokens: rawSqliteTokens,
     net_tokens: netTokens,
@@ -1286,9 +1374,12 @@ function reconcileCodexUsageDetails(report, usageDetails) {
     explicit_fork_threads: nonnegativeInteger(lineageAudit.explicitMatches),
     inferred_fork_threads: nonnegativeInteger(lineageAudit.inferredMatches),
     unresolved_fork_threads: nonnegativeInteger(lineageAudit.missingParents) +
-      nonnegativeInteger(lineageAudit.noSharedPrefix) + nonnegativeInteger(lineageAudit.cyclicParents),
+      nonnegativeInteger(lineageAudit.noSharedPrefix) + nonnegativeInteger(lineageAudit.cyclicParents) + pendingForks,
+    pending_fork_threads: pendingForks,
+    rejected_fork_threads: nonnegativeInteger(lineageAudit.rejectedForks),
     shared_prefix_events: nonnegativeInteger(lineageAudit.sharedPrefixEvents),
     split_invariants_ok: tokenSplitInvariantsOk(distributionRecords),
+    review_items: reviewItems,
     message: sharedHistoryTokens
       ? `已从 ${lineageAudit.matchedForks || 0} 个 fork/分支中排除继承的共享历史`
       : "未检测到重复的 fork 共享历史"
@@ -1314,6 +1405,26 @@ function reconcileCodexUsageDetails(report, usageDetails) {
   };
   applyCanonicalTokenDistributions(report, reconciled);
   return reconciled;
+}
+
+function forkReviewItemPayload(item, scope = "local") {
+  const candidateEvents = nonnegativeInteger(item?.candidatePrefixEvents);
+  return {
+    scope,
+    child_thread_id: cleanString(item?.childThreadId, "", 256),
+    parent_thread_id: cleanString(item?.parentThreadId, "", 256),
+    child_title: cleanString(item?.childTitle, "", 160),
+    parent_title: cleanString(item?.parentTitle, "", 160),
+    match_kind: cleanString(item?.matchKind, "none", 80),
+    status: cleanString(item?.status, "not_applicable", 40),
+    candidate_inherited_tokens: nonnegativeInteger(item?.candidateInheritedTokens),
+    candidate_prefix_events: candidateEvents,
+    candidate_parent_offset: Number.isInteger(item?.candidateParentOffset) ? item.candidateParentOffset : null,
+    applied_inherited_tokens: nonnegativeInteger(item?.appliedInheritedTokens),
+    applied_prefix_events: nonnegativeInteger(item?.appliedPrefixEvents),
+    branch_tokens: nonnegativeInteger(item?.branchTokens),
+    can_decide: candidateEvents > 0
+  };
 }
 
 function capTelemetryEvents(events, tokenLimit) {
@@ -1692,7 +1803,7 @@ function canonicalThreadHash(value) {
   return /^[a-f0-9]{64}$/i.test(normalized) ? normalized.toLowerCase() : hashThreadId(normalized);
 }
 
-function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecords, pricingOverrides, devices) {
+function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecords, pricingOverrides, devices, lineageOptions = {}) {
   const snapshotByThread = new Map();
   for (const snapshot of snapshots || []) {
     const previous = snapshotByThread.get(snapshot.threadHash);
@@ -1710,7 +1821,8 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
       createdAt: "",
       events: [],
       hasRemote: false,
-      localForkMatchKind: "none"
+      localForkMatchKind: "none",
+      localForkApplied: false
     });
     return groups.get(threadId);
   };
@@ -1724,6 +1836,7 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
       group.parentThreadId = canonicalThreadHash(session.parentThreadId || session.forkParentThreadId);
     }
     group.localForkMatchKind = session.forkMatchKind || group.localForkMatchKind;
+    group.localForkApplied ||= nonnegativeInteger(session.inheritedTokens) > 0;
     const events = Array.isArray(session.rawEvents) ? session.rawEvents : session.events;
     for (const event of events || []) group.events.push({ ...event, deviceId: "local", referenceOnly: true });
   }
@@ -1778,7 +1891,10 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
         ...(snapshot ? { sqliteTokens: snapshot.totalTokens } : {})
       };
     });
-  const lineage = deduplicateLineageRecords(lineageInput, { inferUnlinked: true });
+  const lineage = deduplicateLineageRecords(lineageInput, {
+    inferUnlinked: true,
+    ...lineageOptions
+  });
   const records = [];
   let sharedHistoryTokens = 0;
   let sharedHistoryEvents = 0;
@@ -1793,10 +1909,14 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
       .filter((event) => event.deviceId && event.deviceId !== "local");
     for (const event of removed) sharedHistoryTokens += nonnegativeInteger(event.usageSplit?.total_tokens);
     sharedHistoryEvents += removed.length;
-    const countedLocally = original.localForkMatchKind && original.localForkMatchKind !== "none";
-    if (!countedLocally && thread.forkMatchKind === "explicit_parent") explicitForkThreads += 1;
-    else if (!countedLocally && thread.forkMatchKind === "inferred_exact_prefix") inferredForkThreads += 1;
-    else if (!countedLocally && thread.forkMatchKind.startsWith("explicit_parent_")) unresolvedForkThreads += 1;
+    const countedLocally = original.localForkApplied === true;
+    const explicitMatch = ["explicit_parent", "explicit_parent_aligned"].includes(thread.forkMatchKind);
+    if (!countedLocally && thread.inheritedTokens > 0 && explicitMatch) explicitForkThreads += 1;
+    else if (!countedLocally && thread.inheritedTokens > 0 && thread.forkMatchKind === "inferred_exact_prefix") inferredForkThreads += 1;
+    else if (!countedLocally && thread.forkReviewStatus !== "rejected" &&
+      (thread.forkReviewStatus === "pending" || thread.forkMatchKind.startsWith("explicit_parent_"))) {
+      unresolvedForkThreads += 1;
+    }
 
     const keptRemote = thread.events.filter((event) => event.deviceId && event.deviceId !== "local");
     records.push(...keptRemote);
@@ -1835,6 +1955,9 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
   const rawTelemetryTokens = (remoteRecords || [])
     .reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
   const netTokens = records.reduce((sum, record) => sum + nonnegativeInteger(record.usageSplit?.total_tokens), 0);
+  const reviewItems = (lineage.audit.reviewItems || [])
+    .filter((item) => groups.get(item.childThreadId)?.hasRemote && !groups.get(item.childThreadId)?.localForkApplied)
+    .map((item) => forkReviewItemPayload(item, "remote"));
   return {
     records,
     audit: {
@@ -1845,7 +1968,10 @@ function reconcileRemoteDeviceUsage(remoteRecords, snapshots, localSessionRecord
       forkThreads: explicitForkThreads + inferredForkThreads,
       explicitForkThreads,
       inferredForkThreads,
-      unresolvedForkThreads
+      unresolvedForkThreads,
+      pendingForkThreads: reviewItems.filter((item) => item.status === "pending").length,
+      rejectedForkThreads: reviewItems.filter((item) => item.status === "rejected").length,
+      reviewItems
     }
   };
 }
@@ -1906,7 +2032,8 @@ async function enrichReportWithDevices(report, usageDetails, user) {
     eligibleSnapshots,
     usageDetails.records,
     usageDetails.pricingOverrides,
-    enabled
+    enabled,
+    forkLineageOptions(user.codexUsage)
   );
   const remoteRecords = remoteReconciliation.records;
 
@@ -1956,6 +2083,11 @@ async function enrichReportWithDevices(report, usageDetails, user) {
     nonnegativeInteger(remoteAudit.sharedHistoryTokens);
   const combinedNetTokens = nonnegativeInteger(allView.summary.total_tokens);
   const combinedRawTokens = combinedNetTokens + combinedSharedHistory;
+  const reviewItems = [...(localAudit.review_items || []), ...(remoteAudit.reviewItems || [])];
+  const pendingForkThreads = nonnegativeInteger(localAudit.pending_fork_threads) +
+    nonnegativeInteger(remoteAudit.pendingForkThreads);
+  const rejectedForkThreads = nonnegativeInteger(localAudit.rejected_fork_threads) +
+    nonnegativeInteger(remoteAudit.rejectedForkThreads);
   report.token_audit = {
     ...localAudit,
     raw_sqlite_tokens: combinedRawTokens,
@@ -1971,9 +2103,12 @@ async function enrichReportWithDevices(report, usageDetails, user) {
       nonnegativeInteger(remoteAudit.inferredForkThreads),
     unresolved_fork_threads: nonnegativeInteger(localAudit.unresolved_fork_threads) +
       nonnegativeInteger(remoteAudit.unresolvedForkThreads),
+    pending_fork_threads: pendingForkThreads,
+    rejected_fork_threads: rejectedForkThreads,
     shared_prefix_events: nonnegativeInteger(localAudit.shared_prefix_events) +
       nonnegativeInteger(remoteAudit.sharedHistoryEvents),
     split_invariants_ok: tokenSplitInvariantsOk(allRecords),
+    review_items: reviewItems,
     message: combinedSharedHistory
       ? `已排除 ${formatCompactTokensForReport(combinedSharedHistory)} fork/分支共享历史，统计仅保留各分支净新增`
       : "未检测到重复的 fork/分支共享历史"
@@ -4043,6 +4178,61 @@ async function saveSub2ApiKey(req, userId) {
   return getCodexUsageState({ force: true, userId: user.id });
 }
 
+function forkReviewStatePayload(result, user) {
+  const audit = result?.report?.token_audit || {};
+  const items = Array.isArray(audit.review_items) ? audit.review_items : [];
+  return {
+    status: result?.status || "empty",
+    generatedAt: result?.generatedAt || null,
+    userId: user.id,
+    reviewMode: user.codexUsage?.forkReviewMode === "automatic" ? "automatic" : "assisted",
+    summary: {
+      forkThreads: nonnegativeInteger(audit.fork_threads),
+      explicitForkThreads: nonnegativeInteger(audit.explicit_fork_threads),
+      inferredForkThreads: nonnegativeInteger(audit.inferred_fork_threads),
+      unresolvedForkThreads: nonnegativeInteger(audit.unresolved_fork_threads),
+      pendingForkThreads: nonnegativeInteger(audit.pending_fork_threads),
+      rejectedForkThreads: nonnegativeInteger(audit.rejected_fork_threads),
+      sharedHistoryTokensExcluded: nonnegativeInteger(audit.shared_history_tokens_excluded),
+      rawTokens: nonnegativeInteger(audit.raw_sqlite_tokens),
+      netTokens: nonnegativeInteger(audit.net_tokens)
+    },
+    items
+  };
+}
+
+async function getForkReviewState(userId, { force = false } = {}) {
+  const config = await loadConfig();
+  const user = getUsageUser(config, userId || config.activeUsageUserId);
+  let result = await getCodexUsageState({ force, userId: user.id });
+  if (!force && result?.report && !Array.isArray(result.report.token_audit?.review_items)) {
+    result = await getCodexUsageState({ force: true, userId: user.id });
+  }
+  return forkReviewStatePayload(result, user);
+}
+
+async function saveForkDecision(body) {
+  const config = await loadConfig();
+  const user = findUsageUser(config, body.userId || config.activeUsageUserId);
+  if (!user) throw Object.assign(new Error("Usage user not found"), { statusCode: 404 });
+  const childThreadId = cleanString(body.childThreadId, "", 256);
+  const parentThreadId = cleanString(body.parentThreadId, "", 256);
+  const action = cleanString(body.action, "", 20);
+  if (!childThreadId || !parentThreadId || !["approve", "reject", "auto"].includes(action)) {
+    throw Object.assign(new Error("Fork decision requires childThreadId, parentThreadId and approve/reject/auto"), {
+      statusCode: 400
+    });
+  }
+  const decisions = normalizeForkDecisions(user.codexUsage?.forkDecisions)
+    .filter((item) => item.childThreadId !== childThreadId || item.parentThreadId !== parentThreadId);
+  if (action !== "auto") {
+    decisions.push({ childThreadId, parentThreadId, action, updatedAt: new Date().toISOString() });
+  }
+  user.codexUsage = normalizeCodexUsageConfig({ ...user.codexUsage, forkDecisions: decisions });
+  await saveConfig(config);
+  return getForkReviewState(user.id, { force: true });
+}
+
 function deviceBearerToken(req) {
   const header = String(req.headers.authorization || "");
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
@@ -4172,6 +4362,12 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/codex-usage/sessions") {
     return sendJson(res, 200, await getCodexUsageSessionsState(url.searchParams));
   }
+  if (req.method === "GET" && url.pathname === "/api/codex-usage/forks") {
+    return sendJson(res, 200, await getForkReviewState(url.searchParams.get("userId")));
+  }
+  if (req.method === "POST" && url.pathname === "/api/codex-usage/forks/decision") {
+    return sendJson(res, 200, await saveForkDecision(await parseBody(req)));
+  }
   if (req.method === "POST" && url.pathname === "/api/codex-usage/refresh") {
     const body = await parseBody(req);
     return sendJson(res, 200, publicCodexUsageState(await getCodexUsageState({
@@ -4237,7 +4433,8 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "PUT" && url.pathname === "/api/config") {
     const body = await parseBody(req);
-    const config = await saveConfig(body.config || body);
+    const current = await loadConfig();
+    const config = await saveConfig(preservePrivateUsageConfig(body.config || body, current));
     if (!config.schedule.enabled) config.schedule.nextRunAt = null;
     return sendJson(res, 200, await getState());
   }
@@ -4387,6 +4584,7 @@ module.exports = {
   getCodexUsageState,
   generateCodexUsageHtmlReport,
   mergeDeviceState,
+  preservePrivateUsageConfig,
   resolveMonitorPublicUrl,
   reconcileCodexUsageDetails,
   reconcileRemoteDeviceUsage

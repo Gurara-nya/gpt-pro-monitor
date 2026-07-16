@@ -422,6 +422,25 @@ test("device breakdown uses the selected month denominator and monthly coverage"
 });
 
 test("device daily projection keeps one compact series per enabled device and supports filtering", () => {
+  const exactCost = (value) => ({
+    low_usd: value,
+    high_usd: value,
+    midpoint_usd: value,
+    range_display: `$${value}`,
+    components: {
+      input_usd: value / 2,
+      cached_input_usd: value / 4,
+      output_usd: value / 4
+    },
+    exact: true
+  });
+  const rangeCost = (low, high) => ({
+    low_usd: low,
+    high_usd: high,
+    midpoint_usd: (low + high) / 2,
+    range_display: `$${low}–$${high}`,
+    exact: false
+  });
   const report = {
     device_breakdown: [
       { id: "local", name: "Workstation", enabled: true, revoked: false, stale: false },
@@ -431,12 +450,12 @@ test("device daily projection keeps one compact series per enabled device and su
     month_views: [{ month: "2026-07" }],
     device_views: {
       local: { month_views: [{ month: "2026-07", days: [
-        { day: "2026-07-13", tokens: 30 },
-        { day: "2026-07-14", tokens: 50 }
+        { day: "2026-07-13", tokens: 30, usage_split: usage(20, 10, 5, 4), cost_estimate: exactCost(0.3) },
+        { day: "2026-07-14", tokens: 50, usage_split: usage(35, 15, 10, 6), cost_estimate: exactCost(0.5) }
       ] }] },
       remote: { month_views: [{ month: "2026-07", days: [
-        { day: "2026-07-13", tokens: 70 },
-        { day: "2026-07-14", tokens: 10 }
+        { day: "2026-07-13", tokens: 70, usage_split: usage(50, 20, 20, 8), cost_estimate: exactCost(0.7) },
+        { day: "2026-07-14", tokens: 10, usage_split: usage(7, 3, 2, 1), cost_estimate: rangeCost(0.05, 0.15) }
       ] }] },
       revoked: { month_views: [{ month: "2026-07", days: [
         { day: "2026-07-14", tokens: 999 }
@@ -447,6 +466,9 @@ test("device daily projection keeps one compact series per enabled device and su
   const all = compactDeviceDailyByMonth(report, "all");
   assert.deepEqual(all["2026-07"].map((series) => series.id), ["local", "remote"]);
   assert.deepEqual(all["2026-07"].map((series) => series.points.map((point) => point.tokens)), [[30, 50], [70, 10]]);
+  assert.deepEqual(all["2026-07"][0].points[0].usage, [20, 5, 10]);
+  assert.deepEqual(all["2026-07"][1].points[0].cost, [0.7, 0.7, 1]);
+  assert.deepEqual(all["2026-07"][1].points[1].cost, [0.05, 0.15, 0]);
   assert.equal(all["2026-07"][1].stale, true);
 
   const selected = compactDeviceDailyByMonth(report, "remote");

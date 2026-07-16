@@ -118,8 +118,94 @@ test("opt-in inference requires at least five exact states and 100000 inherited 
   assert.deepEqual(result.audit.inference, {
     enabled: true,
     minPrefixEvents: 5,
-    minInheritedTokens: 100_000
+    minInheritedTokens: 100_000,
+    reviewMode: "automatic"
   });
+});
+
+test("explicit children align to a continuous sequence in the middle of their parent", () => {
+  const parentEvents = events([40_000, 50_000, 60_000, 70_000]);
+  const normalizedParent = deduplicateLineageRecords([{ threadId: "seed", events: parentEvents }]).records[0];
+  const childEvents = normalizedParent.rawEvents.slice(1, 3).map((event) => ({
+    usageSplit: event.usageSplit,
+    cumulativeUsage: event.cumulativeUsage
+  }));
+  childEvents.push({ usageSplit: usage(25_000) });
+
+  const result = deduplicateLineageRecords([
+    { threadId: "parent", createdAt: "2026-07-14T00:00:00Z", events: parentEvents },
+    { threadId: "child", parentThreadId: "parent", createdAt: "2026-07-14T01:00:00Z", sqliteTokens: 135_000, events: childEvents }
+  ]);
+  const child = byId(result, "child");
+
+  assert.equal(child.forkMatchKind, "explicit_parent_aligned");
+  assert.equal(child.forkReviewStatus, "auto_applied");
+  assert.equal(child.candidateParentOffset, 1);
+  assert.equal(child.candidatePrefixEvents, 2);
+  assert.equal(child.sharedPrefixEvents, 2);
+  assert.equal(child.candidateInheritedTokens, 110_000);
+  assert.equal(child.inheritedTokens, 110_000);
+  assert.equal(child.usageSplit.total_tokens, 25_000);
+});
+
+test("a single aligned state stays pending until explicitly approved", () => {
+  const parentEvents = events([40_000, 50_000, 60_000]);
+  const normalizedParent = deduplicateLineageRecords([{ threadId: "seed", events: parentEvents }]).records[0];
+  const childEvents = [{
+    usageSplit: normalizedParent.rawEvents[1].usageSplit,
+    cumulativeUsage: normalizedParent.rawEvents[1].cumulativeUsage
+  }];
+  const records = [
+    { threadId: "parent", createdAt: "2026-07-14T00:00:00Z", events: parentEvents },
+    { threadId: "child", parentThreadId: "parent", createdAt: "2026-07-14T01:00:00Z", sqliteTokens: 50_000, events: childEvents }
+  ];
+
+  const pending = deduplicateLineageRecords(records);
+  assert.equal(byId(pending, "child").forkReviewStatus, "pending");
+  assert.equal(byId(pending, "child").candidateParentOffset, 1);
+  assert.equal(byId(pending, "child").candidatePrefixEvents, 1);
+  assert.equal(byId(pending, "child").sharedPrefixEvents, 0);
+  assert.equal(byId(pending, "child").inheritedTokens, 0);
+  assert.equal(pending.audit.pendingForks, 1);
+
+  const approved = deduplicateLineageRecords(records, {
+    forkDecisions: [{ childThreadId: "child", parentThreadId: "parent", action: "approve" }]
+  });
+  assert.equal(byId(approved, "child").forkReviewStatus, "approved");
+  assert.equal(byId(approved, "child").inheritedTokens, 50_000);
+  assert.equal(byId(approved, "child").usageSplit.total_tokens, 0);
+
+  const rejected = deduplicateLineageRecords(records, {
+    forkDecisions: [{ childThreadId: "child", parentThreadId: "parent", action: "reject" }]
+  });
+  assert.equal(byId(rejected, "child").forkReviewStatus, "rejected");
+  assert.equal(byId(rejected, "child").inheritedTokens, 0);
+  assert.equal(byId(rejected, "child").usageSplit.total_tokens, 50_000);
+  assert.equal(rejected.audit.rejectedForks, 1);
+});
+
+test("assisted review leaves inferred forks pending and accepts decisions", () => {
+  const common = events([25_000, 25_000, 25_000, 25_000, 25_000]);
+  const records = [
+    { threadId: "parent", createdAt: "2026-07-14T00:00:00Z", events: common },
+    { threadId: "child", createdAt: "2026-07-14T01:00:00Z", sqliteTokens: 155_000, events: [...common, ...events([30_000], "2026-07-15")] }
+  ];
+  const pending = deduplicateLineageRecords(records, { inferUnlinked: true, reviewMode: "assisted" });
+  const pendingChild = byId(pending, "child");
+  assert.equal(pendingChild.forkMatchKind, "inferred_exact_prefix");
+  assert.equal(pendingChild.forkReviewStatus, "pending");
+  assert.equal(pendingChild.inheritedTokens, 0);
+  assert.equal(pendingChild.branchTokens, 155_000);
+  assert.equal(pending.audit.pendingForks, 1);
+
+  const approved = deduplicateLineageRecords(records, {
+    inferUnlinked: true,
+    reviewMode: "assisted",
+    forkDecisions: [{ childThreadId: "child", parentThreadId: "parent", action: "approve" }]
+  });
+  assert.equal(byId(approved, "child").forkReviewStatus, "approved");
+  assert.equal(byId(approved, "child").inheritedTokens, 125_000);
+  assert.equal(byId(approved, "child").branchTokens, 30_000);
 });
 
 test("provided cumulative states are preserved while missing states are rebuilt from deltas", () => {

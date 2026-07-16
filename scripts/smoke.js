@@ -47,11 +47,22 @@ async function main() {
   if (usage.report) {
     assert.equal(usage.report.sessions, undefined);
     assert.equal(usage.report.device_views, undefined);
+    assert.equal(usage.report.daily, undefined);
     assert.equal(Array.isArray(usage.report.device_breakdown), true);
     assert.equal(typeof usage.report.device_breakdown_by_month, "object");
     assert.equal(typeof usage.report.device_daily_by_month, "object");
     assert.equal(typeof usage.report.token_audit, "object");
     assert.equal(typeof usage.report.token_audit.shared_history_tokens_excluded, "number");
+    assert.equal(usage.report.token_audit.review_items, undefined);
+    for (const series of Object.values(usage.report.device_daily_by_month).flat()) {
+      for (const point of series.points || []) {
+        assert.equal(Number.isInteger(point.d), true);
+        assert.equal(Array.isArray(point.usage), true);
+        assert.equal(point.usage.length, 3);
+        assert.equal(point.cost === null || Array.isArray(point.cost), true);
+        if (point.cost) assert.equal(point.cost.length, 3);
+      }
+    }
     for (const month of usage.report.month_views || []) {
       assert.equal(Array.isArray(usage.report.device_breakdown_by_month[month.month]), true);
     }
@@ -72,6 +83,12 @@ async function main() {
   assert.equal(sessions.items.length <= 2, true);
   assert.equal(sessions.pagination.pageSize, 2);
   assert.equal(typeof sessions.pagination.totalItems, "number");
+
+  const forks = await request(`/api/codex-usage/forks?userId=${encodeURIComponent(userId)}`);
+  assert.equal(["assisted", "automatic"].includes(forks.reviewMode), true);
+  assert.equal(typeof forks.summary, "object");
+  assert.equal(Array.isArray(forks.items), true);
+  assert.equal(forks.items.every((item) => typeof item.can_decide === "boolean"), true);
 
   const exported = await request("/api/export");
   assert.equal(typeof exported.config.account.label, "string");
@@ -178,6 +195,12 @@ async function main() {
   const aliasResponse = await fetch(`${origin}/monitor/`, { headers: authHeaders() });
   assert.equal(aliasResponse.ok, true, `/monitor/ returned ${aliasResponse.status}`);
   assert.match(await aliasResponse.text(), /GPT Pro Monitor/);
+  const aliasForksResponse = await fetch(
+    `${origin}/monitor/api/codex-usage/forks?userId=${encodeURIComponent(userId)}`,
+    { cache: "no-store", headers: authHeaders() }
+  );
+  assert.equal(aliasForksResponse.ok, true, `/monitor fork review returned ${aliasForksResponse.status}`);
+  assert.equal(Array.isArray((await aliasForksResponse.json()).items), true);
   const aliasHelpResponse = await fetch(`${origin}/monitor/help`, { headers: authHeaders() });
   assert.equal(aliasHelpResponse.ok, true, `/monitor/help returned ${aliasHelpResponse.status}`);
   const aliasHelpHtml = await aliasHelpResponse.text();

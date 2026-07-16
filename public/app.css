@@ -16,6 +16,10 @@
   --radius: 0px;
   --gap: 18px;
   --tap: 44px;
+  --font-caption: 0.75rem;
+  --font-label: 0.8125rem;
+  --font-body: 0.875rem;
+  --font-section: 1.125rem;
   font-family: "Arial Narrow", "DIN Condensed", "Roboto Condensed", Arial, sans-serif;
 }
 
@@ -152,7 +156,7 @@ button {
 
 .dialog-head h2 {
   margin: 0;
-  font-size: 1.08rem;
+  font-size: 1.25rem;
   font-weight: 800;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -458,7 +462,7 @@ main {
   display: grid;
   gap: 6px;
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -555,7 +559,7 @@ main {
 .settings-section-head p {
   margin-bottom: 4px;
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -565,7 +569,7 @@ main {
 .token-section-head h3,
 .token-audit-head h3,
 .settings-section-head h3 {
-  font-size: 1rem;
+  font-size: var(--font-section);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -608,7 +612,7 @@ main {
 .managed-session-key-metrics b,
 .managed-session-metrics b {
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: var(--font-label);
   font-weight: 900;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -618,14 +622,14 @@ main {
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: clamp(1.55rem, 3vw, 2.7rem);
-  line-height: 0.96;
+  line-height: 1.05;
   letter-spacing: 0;
 }
 
 .token-metric small {
   min-width: 0;
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: var(--font-label);
   font-weight: 800;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -814,7 +818,7 @@ main {
 .token-cost-note {
   margin: 0 0 16px;
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: var(--font-body);
   font-weight: 700;
   line-height: 1.55;
   letter-spacing: 0.04em;
@@ -838,11 +842,28 @@ main {
   margin-bottom: 12px;
 }
 
+.token-trend-controls {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.token-trend-metric {
+  flex: 0 0 190px;
+  gap: 5px;
+  font-size: var(--font-caption);
+}
+
+.token-trend-metric select {
+  min-height: var(--tap);
+}
+
 .token-section-head small,
 .settings-section-head small {
   max-width: 52ch;
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: var(--font-body);
   line-height: 1.5;
   text-align: right;
 }
@@ -868,9 +889,17 @@ main {
   padding: 5px 8px;
   border: 1px solid var(--line-strong);
   color: var(--ink);
-  font-size: 0.72rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.07em;
+}
+
+.token-audit-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .token-audit.is-warning .token-audit-state {
@@ -896,7 +925,7 @@ main {
 .token-audit-grid b,
 .token-audit-grid em {
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   font-style: normal;
   line-height: 1.4;
 }
@@ -909,7 +938,7 @@ main {
 .token-audit-message {
   margin: 0;
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: var(--font-body);
   line-height: 1.55;
 }
 
@@ -948,12 +977,12 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.78rem;
+  font-size: var(--font-label);
 }
 
 .token-daily-legend-item em {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: var(--font-caption);
   font-style: normal;
 }
 
@@ -1010,17 +1039,17 @@ main {
 }
 
 .token-daily-svg {
-  width: 100%;
-  height: auto;
-  min-height: 220px;
+  width: auto;
+  height: 316px;
+  min-height: 0;
   display: block;
   overflow: visible;
 }
 
 .token-daily-axis {
   width: var(--daily-axis-width, 76px);
-  height: auto;
-  min-height: 220px;
+  height: 316px;
+  min-height: 0;
   display: block;
   overflow: visible;
 }
@@ -1039,7 +1068,7 @@ main {
 .token-daily-labels text,
 .token-daily-axis-grid text {
   fill: var(--muted);
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 900;
   letter-spacing: 0.04em;
 }
@@ -1048,12 +1077,22 @@ main {
   text-anchor: end;
 }
 
+.token-daily-axis-grid .token-daily-axis-title {
+  fill: var(--ink);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+}
+
 .token-daily-series {
   fill: none;
   stroke: var(--series-stroke, var(--ink));
-  stroke-width: 4;
+  stroke-width: var(--series-width, 2.6);
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.token-daily-series.is-total {
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.24));
 }
 
 .token-daily-series-point circle {
@@ -1065,10 +1104,15 @@ main {
   transform-origin: center;
 }
 
-.token-daily-series-point:hover circle {
+.token-daily-series-point:hover circle,
+.token-daily-series-point:focus-visible circle {
   fill: var(--series-stroke, var(--ink));
   stroke: var(--canvas);
   transform: scale(1.25);
+}
+
+.token-daily-series-point:focus-visible {
+  outline: none;
 }
 
 .token-daily-summary {
@@ -1963,6 +2007,7 @@ dialog::backdrop {
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.018);
   overflow-x: auto;
+  scroll-snap-type: x proximity;
 }
 
 .settings-tab {
@@ -1975,6 +2020,7 @@ dialog::backdrop {
   cursor: pointer;
   font-weight: 900;
   letter-spacing: 0.08em;
+  scroll-snap-align: start;
 }
 
 .settings-tab:first-child {
@@ -2029,6 +2075,173 @@ dialog::backdrop {
   font-size: 1rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.fork-review-controls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.fork-review-rule {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: var(--font-body);
+  line-height: 1.6;
+}
+
+.fork-review-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.fork-review-summary > span {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: var(--panel);
+}
+
+.fork-review-summary b,
+.fork-review-summary em {
+  color: var(--muted);
+  font-size: var(--font-caption);
+  font-style: normal;
+}
+
+.fork-review-summary strong {
+  overflow-wrap: anywhere;
+  font-size: 1.12rem;
+}
+
+.fork-review-list-tools {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.fork-review-filters {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.fork-review-filter {
+  min-width: 0;
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--font-label);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.fork-review-filter:hover,
+.fork-review-filter[aria-pressed="true"] {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fork-review-filter[aria-pressed="true"] {
+  box-shadow: inset 0 -2px 0 var(--ink);
+}
+
+.fork-review-filter span {
+  min-width: 2.1em;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  text-align: center;
+  font-size: var(--font-caption);
+  letter-spacing: 0;
+}
+
+.fork-review-list-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-label);
+  line-height: 1.45;
+}
+
+.fork-review-list {
+  display: grid;
+  gap: 8px;
+}
+
+.fork-review-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.42fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.fork-review-row.is-pending {
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+
+.fork-review-main,
+.fork-review-metrics {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.fork-review-main strong,
+.fork-review-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fork-review-main span,
+.fork-review-main small,
+.fork-review-metrics span {
+  color: var(--muted);
+  font-size: var(--font-label);
+  line-height: 1.45;
+}
+
+.fork-review-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.fork-review-actions button {
+  min-height: var(--tap);
+}
+
+.fork-review-state {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: var(--font-caption);
+  font-weight: 900;
 }
 
 .form-grid {
@@ -2114,7 +2327,7 @@ dialog::backdrop {
 
 .device-settings-heading p {
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -2281,7 +2494,7 @@ dialog::backdrop {
   padding: 3px 7px;
   border: 1px solid var(--line);
   color: var(--muted);
-  font-size: 0.66rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.06em;
 }
@@ -2311,7 +2524,7 @@ dialog::backdrop {
 
 .device-settings-meta dt {
   color: var(--muted);
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 900;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2320,7 +2533,7 @@ dialog::backdrop {
 .device-settings-meta dd {
   overflow-wrap: anywhere;
   margin: 5px 0 0;
-  font-size: 0.74rem;
+  font-size: var(--font-label);
 }
 
 .device-settings-actions {
@@ -2383,7 +2596,7 @@ label {
   gap: 7px;
   min-width: 0;
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: var(--font-label);
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2585,16 +2798,29 @@ input[type="color"] {
   }
 
   .token-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .token-cost-metrics .token-metric:last-child,
   .token-volume-metrics .token-metric:last-child {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 
   .token-audit-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fork-review-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fork-review-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .fork-review-metrics {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 
   .token-breakdowns {
@@ -2663,6 +2889,16 @@ input[type="color"] {
   .settings-section-head small {
     max-width: none;
     text-align: left;
+  }
+
+  .token-trend-controls,
+  .token-trend-metric {
+    width: 100%;
+  }
+
+  .token-trend-controls {
+    display: grid;
+    justify-content: stretch;
   }
 
   .device-create-row,
@@ -2764,6 +3000,55 @@ input[type="color"] {
     padding: 14px;
   }
 
+  .dialog-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 12px;
+  }
+
+  .dialog-actions > span {
+    display: none;
+  }
+
+  .dialog-actions #exportButton {
+    grid-column: 1 / -1;
+  }
+
+  .dialog-actions .text-button,
+  .dialog-actions .filled-button {
+    width: 100%;
+  }
+
+  .fork-review-controls,
+  .fork-review-summary,
+  .fork-review-row {
+    grid-template-columns: 1fr;
+  }
+
+  .fork-review-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fork-review-row {
+    align-items: stretch;
+  }
+
+  .fork-review-metrics,
+  .fork-review-actions {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .fork-review-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  input,
+  select {
+    font-size: 1rem;
+  }
+
   .pricing-override-row {
     grid-template-columns: 1fr;
   }
@@ -2822,11 +3107,11 @@ input[type="color"] {
   }
 
   .token-volume-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .token-volume-metrics .token-metric:last-child {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 
   .token-audit-grid {

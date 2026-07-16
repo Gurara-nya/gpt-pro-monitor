@@ -44,7 +44,7 @@
           <a href="#quick">快速接入</a>
           <a href="#upgrade">升级 2.1.1</a>
           <a href="#daily">日常操作</a>
-          <a href="#audit">统计口径</a>
+          <a href="#audit">统计与审批</a>
           <a href="#privacy">数据边界</a>
           <a href="#troubleshooting">排障</a>
         </nav>
@@ -144,8 +144,8 @@
         </section>
 
         <section class="help-section" id="audit">
-          <div class="help-section-title"><span>04</span><div><p>Token accounting</p><h2>Fork 只统计分叉后新增用量</h2></div></div>
-          <p class="section-intro">Fork、新分支和子任务会继承父会话的累计 Token 历史。Monitor 会识别这段共享前缀并扣除，只把分叉后真正新增的输入、缓存输入和输出计入日报、设备占比与 API 等价成本。</p>
+          <div class="help-section-title"><span>04</span><div><p>Token accounting</p><h2>费用、日趋势与 Fork 净用量</h2></div></div>
+          <p class="section-intro">Monitor 按事件拆分未缓存输入、缓存输入和输出，并先扣除 Fork 继承的共享历史。日报、设备占比与 API 等价成本因此统一使用分叉后真正新增的净用量。</p>
           <div class="audit-formula" aria-label="Token 净用量计算方法">
             <article><span>01 · 原始</span><strong>原始 Token</strong><p>SQLite 与 telemetry 记录的线程累计总量，尚未处理继承历史。</p></article>
             <i aria-hidden="true">−</i>
@@ -156,10 +156,24 @@
           <div class="audit-guidance">
             <article><h3>在哪里核对</h3><p>在消耗仪表盘的“数据审计”区域查看<strong>原始 Token、已扣除共享历史、净 Token</strong>和 Fork 线程数。三者应满足：净值 = 原始值 − 扣除值。</p></article>
             <article><h3>分叉后的新消耗会保留</h3><p>仅扣除父子线程完全一致的历史前缀。Fork 之后产生的新累计状态仍归入实际发生日期和对应设备，不会整条会话忽略。</p></article>
-            <article><h3>旧设备为何必须更新</h3><p>2.0 或更早采集数据可能缺少父线程血缘，升级会一次性补齐；2.1.1 同时保证采集器在耗时首同步前先写入本地安装目录。</p></article>
+            <article><h3>什么时候费用是确定值</h3><p>所选范围的未缓存输入、缓存输入、输出均已拆分，且模型、日期与长上下文倍率都有价格时，面板显示<strong>“确定值”</strong>。推理输出包含在输出内，不会重复计费。</p></article>
+            <article><h3>什么时候仍显示估算</h3><p>缺少 rollout 拆分或模型价格时，只有缺口会进入混合估算、区间或未定价。拆分覆盖率和已定价覆盖率可说明原因；金额始终是 API 等价成本，不是 ChatGPT 套餐账单。</p></article>
+            <article><h3>日趋势如何读</h3><p>亮色实线是所选范围合计，多设备时每台设备再绘制一条虚线。可切换总 Token、未缓存输入、缓存输入、输出和成本；所有曲线、刻度与摘要使用同一纵轴口径。</p></article>
             <article><h3>设备归属如何确定</h3><p>升级时保留已有本机归属；之后新事件固定归给中心首次观察到它的设备。复制同一 rollout 不会改变既有设备占比，跨设备继续产生的新状态则归新设备。</p></article>
           </div>
-          <p class="callout"><strong>日量仍异常高时：</strong>先确认所有远端设备均为 Agent 2.1.1 且已完成一次完整同步，再刷新用量缓存，并对照数据审计区的原始、扣除与净值。</p>
+          <details class="help-details" open>
+            <summary>人工审批 Fork：确认排除、保留计入与恢复规则</summary>
+            <div class="details-body">
+              <p>进入<strong>“设置 → Fork 审批”</strong>。推荐保留“辅助审批”：显式父会话连续匹配至少 2 个累计状态时自动排除；只有 1 个共同状态或仅由精确前缀推断出的关系先保留计入，等待人工确认。子会话从父会话中段开始也能识别；没有共同状态、缺少父记录或存在循环关系时不会猜测扣除。</p>
+              <ol class="compact-steps">
+                <li><span>1</span><p>先核对父子会话、候选共享 Token、连续状态数、父事件偏移和分支净新增量。</p></li>
+                <li><span>2</span><p>确认是继承历史时点<strong>“确认排除”</strong>；认为是独立消耗或证据不足时点<strong>“保留计入”</strong>。后者会把此前已经排除的 Token 加回。</p></li>
+                <li><span>3</span><p>要撤销人工决定时点<strong>“恢复规则”</strong>，该关系会重新按当前审批模式判断。每次操作都会重算趋势、设备占比和费用。</p></li>
+              </ol>
+              <p>“高置信自动应用”会让精确前缀推断也自动排除；人工决定始终优先。审批只使用线程关系和累计 Token 状态，不读取提示词、回复或代码正文。</p>
+            </div>
+          </details>
+          <p class="callout"><strong>日量仍异常高时：</strong>先确认所有远端设备均为 Agent 2.1.1 且已完成一次完整同步，再刷新用量缓存；随后对照数据审计区的原始、扣除与净值，并在“设置 → Fork 审批”处理待审批关系。</p>
         </section>
 
         <section class="help-section" id="privacy">
@@ -180,7 +194,7 @@
             <details><summary>设备显示“数据过期”</summary><p>在远程电脑运行上面的“查看本机状态”和“手动同步一次”。若返回 401，请在 Monitor 对该设备执行“重新接入”，再运行新命令。</p></details>
             <details><summary>更换电脑或令牌泄露</summary><p>在设备卡片点击“重新接入”。新命令生成后旧令牌立即失效；在新电脑运行新命令即可。</p></details>
             <details><summary>重复复制了同一份 Codex 历史</summary><p>服务端会按与设备无关的事件 ID 幂等去重，同一个 rollout 出现在多台设备时不会重复计量。</p></details>
-            <details><summary>Fork 后某一天的用量仍然很高</summary><p>先在“数据审计”核对共享历史扣除量。如果远端设备尚未升级，请先更新至 Agent 2.1.1；从 2.0 或更早版本升级时需等待完整重扫结束，已有 2.1 设备会沿用增量游标。随后在首页刷新用量，确认净 Token 已重新计算。</p></details>
+            <details><summary>Fork 后某一天的用量仍然很高</summary><p>先在“数据审计”核对共享历史扣除量。如果远端设备尚未升级，请先更新至 Agent 2.1.1 并等待完整同步结束；随后在首页刷新用量，再进入“设置 → Fork 审批”查看待审批关系。确认是继承历史时选择“确认排除”，证据不足时选择“保留计入”，处理后确认净 Token 与趋势已重新计算。</p></details>
           </div>
         </section>
       </main>

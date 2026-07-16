@@ -137,7 +137,19 @@
             <section class="token-daily token-overview-section" aria-label="日消耗">
               <div class="token-section-head">
                 <div><p>Trend</p><h3>日消耗趋势</h3></div>
-                <small>每台设备独立成线，空缺日期按 0 计。</small>
+                <div class="token-trend-controls">
+                  <small id="codexDailyAxisNote">合计线与设备线使用同一纵轴，空缺日期按 0 计。</small>
+                  <label class="token-trend-metric" for="codexDailyMetric">
+                    <span>纵轴指标</span>
+                    <select id="codexDailyMetric">
+                      <option value="total_tokens">总 Token</option>
+                      <option value="uncached_input_tokens">未缓存输入</option>
+                      <option value="cached_input_tokens">缓存输入</option>
+                      <option value="output_tokens">输出 Token</option>
+                      <option value="cost_usd">API 等价成本</option>
+                    </select>
+                  </label>
+                </div>
               </div>
               <div class="token-daily-list" id="codexDailyList"></div>
             </section>
@@ -253,6 +265,7 @@
         <div class="settings-tabs" role="tablist" aria-label="设置分类">
           <button class="settings-tab" id="settingsGeneralTab" type="button" role="tab" aria-controls="settingsGeneralPanel" data-settings-tab="general">常规</button>
           <button class="settings-tab" id="settingsDataTab" type="button" role="tab" aria-controls="settingsDataPanel" data-settings-tab="data">数据与价格</button>
+          <button class="settings-tab" id="settingsForksTab" type="button" role="tab" aria-controls="settingsForksPanel" data-settings-tab="forks">Fork 审批</button>
           <button class="settings-tab" id="settingsDevicesTab" type="button" role="tab" aria-controls="settingsDevicesPanel" data-settings-tab="devices">远程设备</button>
         </div>
 
@@ -316,6 +329,39 @@
                 <label><span>回看天数</span><input id="settingsSub2ApiLookbackDays" type="number" min="1" max="730" /></label>
                 <label class="check-row"><input id="settingsSub2ApiEnabled" type="checkbox" /><span>启用 Sub2API</span></label>
                 <button class="text-button" id="sub2ApiKeySaveButton" type="button">保存 Key 并刷新</button>
+              </div>
+            </section>
+          </section>
+
+          <section class="settings-tab-panel" id="settingsForksPanel" role="tabpanel" aria-labelledby="settingsForksTab" data-settings-panel="forks" hidden>
+            <section class="settings-card settings-fork-card">
+              <div class="settings-section-head">
+                <div><p>Fork integrity</p><h3>Fork 共享历史审批</h3></div>
+                <small>先验证父子累计状态，再决定是否排除继承历史；不会读取提示词或回复正文。</small>
+              </div>
+              <div class="fork-review-controls">
+                <label>
+                  <span>推断关系处理</span>
+                  <select id="settingsForkReviewMode">
+                    <option value="assisted">辅助审批（推荐）</option>
+                    <option value="automatic">高置信自动应用</option>
+                  </select>
+                </label>
+                <button class="text-button" id="refreshForkReviewButton" type="button">重新读取审计</button>
+              </div>
+              <p class="fork-review-rule">显式父会话且连续匹配至少 2 个累计状态时自动排除；单状态或推断关系进入待审批。没有任何共同累计状态的关系无法安全扣除。</p>
+              <div class="fork-review-summary" id="forkReviewSummary" aria-live="polite"></div>
+              <div class="fork-review-list-tools">
+                <div class="fork-review-filters" id="forkReviewFilters" role="group" aria-label="筛选 Fork 审批记录">
+                  <button class="fork-review-filter" type="button" data-fork-filter="actionable" aria-pressed="true" aria-controls="forkReviewList">待处理 <span data-fork-filter-count="actionable">0</span></button>
+                  <button class="fork-review-filter" type="button" data-fork-filter="applied" aria-pressed="false" aria-controls="forkReviewList">已应用 <span data-fork-filter-count="applied">0</span></button>
+                  <button class="fork-review-filter" type="button" data-fork-filter="retained" aria-pressed="false" aria-controls="forkReviewList">已保留 <span data-fork-filter-count="retained">0</span></button>
+                  <button class="fork-review-filter" type="button" data-fork-filter="all" aria-pressed="false" aria-controls="forkReviewList">全部 <span data-fork-filter-count="all">0</span></button>
+                </div>
+                <p class="fork-review-list-status" id="forkReviewListStatus" role="status" aria-live="polite">默认显示待审批与无法自动验证的关系</p>
+              </div>
+              <div class="fork-review-list" id="forkReviewList" aria-live="polite" aria-busy="false" aria-describedby="forkReviewListStatus">
+                <div class="empty-state">打开此页后读取 Fork 审计</div>
               </div>
             </section>
           </section>
